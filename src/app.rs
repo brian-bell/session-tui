@@ -1,99 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-fn is_focus_toggle(key: &KeyEvent) -> bool {
-    // Ctrl+\ arrives as Char('\\') under the kitty protocol but as
-    // Char('4') from legacy terminals (crossterm maps byte 0x1C that way).
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
-}
-
-/// Translate a crossterm key event into the bytes a terminal would
-/// send. `app_cursor` is the child's DECCKM mode: unmodified arrows
-/// become SS3 (ESC O x) instead of CSI (ESC [ x).
-fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    // Modified arrows use the xterm CSI 1;<mod> scheme:
-    // 2=Shift, 3=Alt, 5=Ctrl (and their sums).
-    if let Some(arrow) = match key.code {
-        KeyCode::Up => Some(b'A'),
-        KeyCode::Down => Some(b'B'),
-        KeyCode::Right => Some(b'C'),
-        KeyCode::Left => Some(b'D'),
-        _ => None,
-    } {
-        let mut modifier = 1;
-        if key.modifiers.contains(KeyModifiers::SHIFT) {
-            modifier += 1;
-        }
-        if key.modifiers.contains(KeyModifiers::ALT) {
-            modifier += 2;
-        }
-        if ctrl {
-            modifier += 4;
-        }
-        if modifier > 1 {
-            return Some(format!("\x1b[1;{}{}", modifier, arrow as char).into_bytes());
-        }
-        if app_cursor {
-            return Some(vec![0x1b, b'O', arrow]);
-        }
-    }
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        // Meta convention: ESC-prefix the unmodified encoding.
-        let stripped = KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
-        return encode_key(&stripped, app_cursor).map(|mut bytes| {
-            bytes.insert(0, 0x1b);
-            bytes
-        });
-    }
-    Some(match key.code {
-        KeyCode::Char(c) if ctrl => {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_lowercase() {
-                // Ctrl+A..Ctrl+Z map to 0x01..0x1a
-                vec![c as u8 - b'a' + 1]
-            } else {
-                // Non-letter control bytes. Legacy terminals deliver
-                // 0x1d..0x1f as Ctrl+5..Ctrl+7 (0x1c/Ctrl+4 is the
-                // focus toggle and never reaches here).
-                match c {
-                    ' ' | '@' => vec![0x00],
-                    '[' => vec![0x1b],
-                    ']' | '5' => vec![0x1d],
-                    '^' | '6' => vec![0x1e],
-                    '_' | '7' | '/' => vec![0x1f],
-                    '?' => vec![0x7f],
-                    _ => return None,
-                }
-            }
-        }
-        KeyCode::Char(c) => c.to_string().into_bytes(),
-        KeyCode::Enter => b"\r".to_vec(),
-        KeyCode::Esc => b"\x1b".to_vec(),
-        KeyCode::Backspace => b"\x7f".to_vec(),
-        KeyCode::Tab => b"\t".to_vec(),
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::F(n @ 1..=4) => vec![0x1b, b'O', b'P' + n - 1],
-        KeyCode::F(n @ 5..=12) => {
-            // xterm numbering skips 16 and 22.
-            let code = [15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5];
-            format!("\x1b[{code}~").into_bytes()
-        }
-        _ => return None,
-    })
-}
-
+use crate::input;
 use crate::roster::Roster;
 use crate::sessions::{Agent, SessionMeta};
-use crate::term::CommandSpec;
+use crate::term::{CommandSpec, TermModes};
 
 pub use crate::roster::RunId;
 
@@ -181,9 +91,6 @@ pub struct App {
     /// One-shot user-facing message (e.g. why an action was refused);
     /// cleared on the next keypress.
     pub notice: Option<String>,
-    /// Attached child's DECCKM (application cursor) mode, synced from
-    /// the emulator by the main loop; arrows encode as SS3 when set.
-    pub app_cursor: bool,
     roster: Roster,
     attached: Option<RunId>,
 }
@@ -195,7 +102,6 @@ impl App {
             overlay: Overlay::None,
             scroll_offset: 0,
             notice: None,
-            app_cursor: false,
             roster: Roster::new(sessions),
             attached: None,
         }
@@ -243,11 +149,9 @@ impl App {
         }
     }
 
-    /// Forward pasted text to the attached terminal. `bracketed` is
-    /// whether the child enabled bracketed paste (DECSET 2004, tracked
-    /// by the emulator); without it the delimiters would be literal
-    /// garbage in the child's input.
-    pub fn handle_paste(&mut self, text: &str, bracketed: bool) -> Vec<Effect> {
+    /// Forward pasted text to the attached terminal, encoded for the
+    /// child's modes (bracketed paste only when it enabled DECSET 2004).
+    pub fn handle_paste(&mut self, text: &str, modes: TermModes) -> Vec<Effect> {
         // A paste while the launch picker is open is a project path.
         if let Overlay::LaunchPicker(ref mut picker) = self.overlay {
             picker.input.extend(text.chars().filter(|c| !c.is_control()));
@@ -258,30 +162,22 @@ impl App {
         let (Focus::Terminal, Some(run_id)) = (self.focus, self.attached) else {
             return Vec::new();
         };
-        let bytes = if bracketed {
-            let mut b = b"\x1b[200~".to_vec();
-            b.extend_from_slice(text.as_bytes());
-            b.extend_from_slice(b"\x1b[201~");
-            b
-        } else {
-            text.as_bytes().to_vec()
-        };
         self.scroll_offset = 0;
-        vec![Effect::WriteTerminal { run_id, bytes }]
+        vec![Effect::WriteTerminal { run_id, bytes: input::encode_paste(text, modes) }]
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+    pub fn handle_key(&mut self, key: KeyEvent, modes: TermModes) -> Vec<Effect> {
         self.notice = None;
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
         }
-        if is_focus_toggle(&key) {
+        if input::is_focus_toggle(&key) {
             self.toggle_focus();
             return Vec::new();
         }
         match self.focus {
             Focus::List => self.handle_list_key(key),
-            Focus::Terminal => self.handle_terminal_key(key),
+            Focus::Terminal => self.handle_terminal_key(key, modes),
         }
     }
 
@@ -429,7 +325,7 @@ impl App {
     /// Lines jumped per PageUp/PageDown while scrolled back.
     const SCROLL_STEP: usize = 20;
 
-    fn handle_terminal_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+    fn handle_terminal_key(&mut self, key: KeyEvent, modes: TermModes) -> Vec<Effect> {
         let Some(run_id) = self.attached else {
             return Vec::new();
         };
@@ -446,7 +342,7 @@ impl App {
             }
             _ => self.scroll_offset = 0,
         }
-        match encode_key(&key, self.app_cursor) {
+        match input::encode_key(&key, modes) {
             Some(bytes) => vec![Effect::WriteTerminal { run_id, bytes }],
             None => Vec::new(),
         }

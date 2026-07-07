@@ -89,7 +89,10 @@ fn transcript_derived_strings_render_without_control_characters() {
 fn picker_renders_without_panicking_on_a_tiny_terminal() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = App::new(vec![meta("s1", Agent::Claude, "one")]);
-    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    app.handle_key(
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        session_tui::term::TermModes::default(),
+    );
 
     for (w, h) in [(20, 6), (10, 3), (5, 1), (80, 7)] {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();

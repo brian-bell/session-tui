@@ -52,6 +52,17 @@ impl CommandSpec {
     }
 }
 
+/// DEC private modes the child has set, sampled from the emulator.
+/// Crosses the App seam as a value: the state machine holds no synced
+/// mode state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TermModes {
+    /// DECCKM (application cursor): unmodified arrows encode as SS3.
+    pub app_cursor: bool,
+    /// DECSET 2004: pastes get bracketed-paste delimiters.
+    pub bracketed_paste: bool,
+}
+
 /// Whether a running agent is actively producing output or waiting.
 /// Agent CLIs animate a spinner while working, so "any output within
 /// the threshold" is a reliable busy signal.
@@ -211,13 +222,13 @@ impl PtySession {
         self.parser.lock().unwrap().screen_mut().set_scrollback(rows);
     }
 
-    /// Whether the child enabled bracketed paste (DECSET 2004).
-    pub fn bracketed_paste(&self) -> bool {
-        self.parser.lock().unwrap().screen().bracketed_paste()
-    }
-
-    /// Whether the child enabled application cursor mode (DECCKM).
-    pub fn application_cursor(&self) -> bool {
-        self.parser.lock().unwrap().screen().application_cursor()
+    /// The DEC private modes the child has set right now.
+    pub fn modes(&self) -> TermModes {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        TermModes {
+            app_cursor: screen.application_cursor(),
+            bracketed_paste: screen.bracketed_paste(),
+        }
     }
 }

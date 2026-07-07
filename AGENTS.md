@@ -35,6 +35,13 @@ One binary crate plus a library, `src/`:
   (10k scrollback), and exposes input/resize/kill/status. `CommandSpec`
   builds `claude --resume <id>` / `codex resume <id>` / bare launches.
   `SessionStatus` maps output recency to Busy/Idle (2s threshold).
+  `TermModes` samples the child's DEC private modes (DECCKM, bracketed
+  paste) from the emulator as one value.
+- `input.rs` — user input → child bytes. `encode_key` translates
+  crossterm key events into the ANSI sequences a terminal would send
+  (honoring `TermModes`), `encode_paste` wraps pastes for bracketed
+  paste, and `is_focus_toggle` recognizes the reserved focus chord.
+  The state machine holds no byte-level knowledge.
 - `roster.rs` — the session list and its lifecycle. `Roster` owns the
   `Row`s (scanned transcripts plus provisional launches), each row's
   live run, and selection-by-identity. `launch`/`resume_selected`/
@@ -46,7 +53,9 @@ One binary crate plus a library, `src/`:
   return `Effect`s (`Spawn`, `WriteTerminal`, `Kill`, `Quit`); it never
   touches a PTY. Owns focus (List/Terminal), overlays (confirm
   quit/kill, launch picker), scrollback offset, notices, and the
-  attached run; delegates session-list state to `roster.rs`.
+  attached run; delegates session-list state to `roster.rs` and input
+  encoding to `input.rs`. `handle_key`/`handle_paste` take the child's
+  `TermModes` as a parameter — App holds no synced mode state.
 - `ui.rs` — ratatui rendering: 25/75 layout, session rows, tui-term
   pane, overlays, help/notice bar. `terminal_pane_size` is the single
   source of PTY dimensions.
@@ -74,12 +83,15 @@ fixtures in `tests/fixtures/mod.rs`.
   the child's resolved getcwd — `/tmp` is a symlink on macOS). Missing
   cwds are refused on both launch and resume because portable-pty
   silently falls back to `$HOME`.
-- **Key encoding** (`encode_key`): honors DECCKM (application cursor)
+- **Key encoding** (`input.rs`): honors DECCKM (application cursor)
   and legacy quirks — crossterm reports Ctrl+\ as Ctrl+4 (0x1C) and
   0x1D–0x1F as Ctrl+5..7. Ctrl+\/Ctrl+4 is the reserved focus toggle
-  and must never reach the PTY.
-- **Paste**: bracketed only when the child enabled DECSET 2004 (the
-  emulator tracks it); picker-open pastes fill the path field.
+  and must never reach the PTY. The main loop samples `TermModes` from
+  the attached PTY per input event and passes it into
+  `handle_key`/`handle_paste`.
+- **Paste**: bracketed only when the child enabled DECSET 2004
+  (`TermModes::bracketed_paste`, tracked by the emulator); picker-open
+  pastes fill the path field.
 - **Child lifecycle**: `PtySession::kill` reaps (kill + wait); `Drop`
   kills only if `try_wait` says the child still runs — portable-pty's
   unix `kill()` SIGHUPs the stored pid unconditionally, and a reaped
