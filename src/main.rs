@@ -25,17 +25,38 @@ enum Event {
     Scanned(Vec<SessionMeta>),
 }
 
+/// Restores the user's terminal on every exit path — normal return,
+/// error, or panic unwind. Raw mode in a dropped-back-to shell is worse
+/// than any error we might be exiting with.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        enable_raw_mode()?;
+        if let Err(err) =
+            crossterm::execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)
+        {
+            let _ = disable_raw_mode();
+            return Err(err.into());
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
 fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel::<Event>();
     spawn_input_thread(tx.clone());
     spawn_scanner_thread(tx);
 
-    enable_raw_mode()?;
-    crossterm::execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
-    let result = run(rx);
-    crossterm::execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-    result
+    let _guard = TerminalGuard::new()?;
+    run(rx)
 }
 
 fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
@@ -112,7 +133,10 @@ fn execute(
                 Ok(pty) => {
                     ptys.insert(run_id, pty);
                 }
-                Err(_) => app.mark_exited(run_id),
+                Err(err) => {
+                    app.mark_exited(run_id);
+                    app.notice = Some(format!("failed to start {}: {err:#}", spec.program));
+                }
             }
         }
         Effect::WriteTerminal { run_id, bytes } => {
