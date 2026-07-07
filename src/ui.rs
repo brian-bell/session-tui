@@ -6,13 +6,21 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, Focus, Overlay, PickerState};
+use std::collections::HashMap;
+
+use crate::app::{App, Focus, Overlay, PickerState, RunId};
 use crate::sessions::{Agent, SessionMeta};
+use crate::term::SessionStatus;
 
 /// Fraction of the frame given to the session list.
 pub const LIST_PERCENT: u16 = 25;
 
-pub fn render(f: &mut Frame, app: &App, screen: Option<&vt100::Screen>) {
+pub fn render(
+    f: &mut Frame,
+    app: &App,
+    screen: Option<&vt100::Screen>,
+    statuses: &HashMap<RunId, SessionStatus>,
+) {
     let [main, help] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     let [left, right] = Layout::horizontal([
@@ -21,7 +29,7 @@ pub fn render(f: &mut Frame, app: &App, screen: Option<&vt100::Screen>) {
     ])
     .areas(main);
 
-    render_list(f, app, left);
+    render_list(f, app, statuses, left);
     render_terminal(f, app, screen, right);
     render_help(f, app, help);
     render_overlay(f, app, main);
@@ -39,7 +47,7 @@ pub fn terminal_pane_size(frame: Rect) -> (u16, u16) {
     (right.height.saturating_sub(2), right.width.saturating_sub(2))
 }
 
-fn render_list(f: &mut Frame, app: &App, area: Rect) {
+fn render_list(f: &mut Frame, app: &App, statuses: &HashMap<RunId, SessionStatus>, area: Rect) {
     let focused = app.focus == Focus::List;
     let block = Block::default()
         .borders(Borders::ALL)
@@ -49,7 +57,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .sessions
         .iter()
-        .map(|m| ListItem::new(session_line(app, m)))
+        .map(|m| ListItem::new(session_line(app, m, statuses)))
         .collect();
     let list = List::new(items)
         .block(block)
@@ -58,13 +66,20 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn session_line<'a>(app: &App, m: &'a SessionMeta) -> Line<'a> {
+fn session_line<'a>(
+    app: &App,
+    m: &'a SessionMeta,
+    statuses: &HashMap<RunId, SessionStatus>,
+) -> Line<'a> {
     let (icon, icon_color) = match m.agent {
         Agent::Claude => ("●", Color::LightMagenta),
         Agent::Codex => ("○", Color::LightCyan),
     };
-    let running = app.run_id_for(&m.id).is_some();
-    let marker = if running { "▶" } else { " " };
+    let marker = match app.run_id_for(&m.id).map(|id| statuses.get(&id)) {
+        Some(Some(SessionStatus::Busy)) => "⚡",
+        Some(_) => "▶", // running, idle (or status not sampled yet)
+        None => " ",
+    };
     let project = m.cwd.rsplit('/').next().unwrap_or("");
     Line::from(vec![
         Span::styled(format!("{marker}{icon} "), Style::default().fg(icon_color)),

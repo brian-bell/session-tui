@@ -57,9 +57,11 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
         if let Some(pty) = app.attached_run().and_then(|id| ptys.get(&id)) {
             pty.set_scrollback(app.scroll_offset);
         }
+        let statuses: HashMap<RunId, _> =
+            ptys.iter().map(|(&id, p)| (id, p.status())).collect();
         terminal.draw(|f| match app.attached_run().and_then(|id| ptys.get(&id)) {
-            Some(pty) => pty.with_screen(|screen| ui::render(f, &app, Some(screen))),
-            None => ui::render(f, &app, None),
+            Some(pty) => pty.with_screen(|screen| ui::render(f, &app, Some(screen), &statuses)),
+            None => ui::render(f, &app, None, &statuses),
         })?;
 
         // Coalesce: block briefly for the next event, then drain the queue.

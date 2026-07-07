@@ -34,7 +34,9 @@ fn renders_session_list_left_and_terminal_placeholder_right() {
     ]);
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
-    terminal.draw(|f| ui::render(f, &app, None)).unwrap();
+    terminal
+        .draw(|f| ui::render(f, &app, None, &Default::default()))
+        .unwrap();
     let text = buffer_text(&terminal);
 
     // Left pane lists both sessions (titles truncated to pane width).
