@@ -57,3 +57,17 @@ fn renders_session_list_left_and_terminal_placeholder_right() {
         .unwrap();
     assert_eq!(split_at, 25, "left pane should be 25% wide");
 }
+
+#[test]
+fn picker_renders_without_panicking_on_a_tiny_terminal() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new(vec![meta("s1", Agent::Claude, "one")]);
+    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+    for (w, h) in [(20, 6), (10, 3), (5, 1), (80, 7)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| ui::render(f, &app, None, &Default::default()))
+            .unwrap();
+    }
+}

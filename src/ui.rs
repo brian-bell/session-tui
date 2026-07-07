@@ -134,14 +134,17 @@ fn render_terminal(f: &mut Frame, app: &App, screen: Option<&vt100::Screen>, are
 }
 
 fn render_help(f: &mut Frame, app: &App, area: Rect) {
-    let text = match app.focus {
-        Focus::List => "Enter resume · n new · Ctrl+K kill · j/k move · q quit",
-        Focus::Terminal => "Ctrl+\\ back to list · PgUp/PgDn scrollback",
+    let (text, style) = match &app.notice {
+        Some(notice) => (notice.as_str(), Style::default().fg(Color::Yellow)),
+        None => (
+            match app.focus {
+                Focus::List => "Enter resume · n new · Ctrl+K kill · j/k move · q quit",
+                Focus::Terminal => "Ctrl+\\ back to list · PgUp/PgDn scrollback",
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
     };
-    f.render_widget(
-        Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
+    f.render_widget(Paragraph::new(text).style(style), area);
 }
 
 fn render_overlay(f: &mut Frame, app: &App, area: Rect) {
@@ -173,7 +176,10 @@ fn confirm_box(f: &mut Frame, area: Rect, title: &str, body: &str) {
 }
 
 fn render_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
-    let h = (picker.matches().len() as u16 + 4).clamp(5, area.height.saturating_sub(2));
+    // max-then-min: never feed clamp a min above its max (that panics
+    // on terminals shorter than 7 rows).
+    let max_h = area.height.saturating_sub(2).max(1);
+    let h = (picker.matches().len() as u16).saturating_add(4).max(5).min(max_h);
     let popup = centered(area, (area.width * 6 / 10).max(40), h);
     f.render_widget(Clear, popup);
 

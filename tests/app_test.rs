@@ -195,8 +195,14 @@ fn rescan_preserves_selection_and_provisional_live_entries() {
     app.handle_key(ctrl('\\'));
     let provisional_id = app.sessions[0].id.clone();
 
-    // Fresh scan arrives with a new session on top.
-    app.update_sessions(vec![meta("s3", "newest"), meta("s1", "one"), meta("s2", "two")]);
+    // A rescan of only pre-launch transcripts (the new agent hasn't
+    // written its own yet) must keep the provisional row on top.
+    let old = |id, title| {
+        let mut m = meta(id, title);
+        m.timestamp = chrono::Utc::now() - chrono::Duration::hours(1);
+        m
+    };
+    app.update_sessions(vec![old("s3", "newest"), old("s1", "one"), old("s2", "two")]);
 
     assert_eq!(app.sessions[0].id, provisional_id, "live entry stays on top");
     assert_eq!(app.sessions[1].id, "s3");
@@ -226,6 +232,74 @@ fn page_up_scrolls_back_and_any_other_key_snaps_to_live() {
         effects,
         vec![Effect::WriteTerminal { run_id, bytes: b"x".to_vec() }]
     );
+}
+
+#[test]
+fn resume_refuses_a_session_whose_cwd_no_longer_exists() {
+    // portable-pty silently falls back to $HOME for a missing cwd, so
+    // the agent would resume against the wrong tree.
+    let mut gone = meta("s1", "one");
+    gone.cwd = "/tmp/definitely-gone-e2e-dir".into();
+    let mut app = App::new(vec![gone]);
+
+    let effects = app.handle_key(key(KeyCode::Enter));
+
+    assert!(effects.is_empty(), "must not spawn into a missing dir");
+    assert_eq!(app.focus, Focus::List);
+    assert!(app.attached_run().is_none());
+    assert!(app.notice.is_some(), "user should see why nothing happened");
+}
+
+#[test]
+fn provisional_entry_disappears_when_its_process_exits() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Enter)); // launch in known dir (/tmp)
+    let run_id = app.attached_run().unwrap();
+    assert!(app.sessions[0].id.starts_with("live-"));
+
+    app.mark_exited(run_id);
+    assert!(
+        !app.sessions.iter().any(|m| m.id.starts_with("live-")),
+        "stale provisional rows must not linger (they can't be resumed)"
+    );
+
+    // And a rescan must not resurrect anything either.
+    app.update_sessions(vec![meta("s1", "one")]);
+    assert!(!app.sessions.iter().any(|m| m.id.starts_with("live-")));
+}
+
+#[test]
+fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Enter)); // launch claude in /tmp
+    let run_id = app.attached_run().unwrap();
+
+    // The watcher discovers the transcript the new agent just created:
+    // same agent + cwd, written after the launch.
+    let mut real = meta("real-id", "the actual prompt");
+    real.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
+    app.update_sessions(vec![real, meta("s1", "one")]);
+
+    // One row, not two: the provisional row became the real one.
+    assert!(!app.sessions.iter().any(|m| m.id.starts_with("live-")));
+    assert_eq!(app.sessions.iter().filter(|m| m.id == "real-id").count(), 1);
+    assert_eq!(
+        app.run_id_for("real-id"),
+        Some(run_id),
+        "the live PTY now belongs to the real session id"
+    );
+
+    // Selecting the adopted row re-attaches instead of double-resuming.
+    app.handle_key(ctrl('\\'));
+    let pos = app.sessions.iter().position(|m| m.id == "real-id").unwrap();
+    while app.selected < pos {
+        app.handle_key(key(KeyCode::Down));
+    }
+    let effects = app.handle_key(key(KeyCode::Enter));
+    assert!(effects.is_empty(), "attach must not spawn a second resume");
+    assert_eq!(app.attached_run(), Some(run_id));
 }
 
 #[test]

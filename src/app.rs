@@ -116,6 +116,9 @@ pub struct App {
     pub overlay: Overlay,
     /// Lines scrolled back from live output; 0 = following live.
     pub scroll_offset: usize,
+    /// One-shot user-facing message (e.g. why an action was refused);
+    /// cleared on the next keypress.
+    pub notice: Option<String>,
     /// session id -> live run
     running: HashMap<String, RunId>,
     attached: Option<RunId>,
@@ -130,6 +133,7 @@ impl App {
             focus: Focus::List,
             overlay: Overlay::None,
             scroll_offset: 0,
+            notice: None,
             running: HashMap::new(),
             attached: None,
             next_run_id: 1,
@@ -154,7 +158,18 @@ impl App {
 
     /// The child process behind `run_id` ended (exit or kill).
     pub fn mark_exited(&mut self, run_id: RunId) {
+        let session_ids: Vec<String> = self
+            .running
+            .iter()
+            .filter(|&(_, &r)| r == run_id)
+            .map(|(id, _)| id.clone())
+            .collect();
         self.running.retain(|_, &mut r| r != run_id);
+        // A provisional row has no transcript to resume; once its
+        // process is gone the row is meaningless.
+        self.sessions
+            .retain(|m| !(m.id.starts_with("live-") && session_ids.contains(&m.id)));
+        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
         if self.attached == Some(run_id) {
             self.attached = None;
             self.focus = Focus::List;
@@ -175,6 +190,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        self.notice = None;
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
         }
@@ -257,6 +273,7 @@ impl App {
                 // Session history often points at deleted temp/worktree
                 // dirs; spawning there would silently fall back to $HOME.
                 if !std::path::Path::new(&cwd).is_dir() {
+                    self.notice = Some(format!("directory no longer exists: {cwd}"));
                     return Vec::new();
                 }
                 self.overlay = Overlay::None;
@@ -298,17 +315,45 @@ impl App {
             .collect()
     }
 
-    /// Replace the scanned session list (from a rescan), keeping
-    /// provisional live entries on top and following the selected
-    /// session by identity rather than position.
+    /// Replace the scanned session list (from a rescan), following the
+    /// selected session by identity rather than position. Provisional
+    /// live entries survive only while their process runs, and are
+    /// adopted by the real transcript once the scanner finds it.
     pub fn update_sessions(&mut self, scanned: Vec<SessionMeta>) {
-        let selected_id = self.sessions.get(self.selected).map(|m| m.id.clone());
-        let mut next: Vec<SessionMeta> = self
+        let mut selected_id = self.sessions.get(self.selected).map(|m| m.id.clone());
+
+        let mut live: Vec<SessionMeta> = self
             .sessions
             .iter()
-            .filter(|m| m.id.starts_with("live-"))
+            .filter(|m| m.id.starts_with("live-") && self.running.contains_key(&m.id))
             .cloned()
             .collect();
+
+        // Adopt: a scanned transcript by the same agent, in the same
+        // cwd, written after the launch is this provisional session's
+        // real identity. Move the live PTY over and drop the
+        // placeholder so the session shows exactly once.
+        live.retain(|placeholder| {
+            let real_id = scanned.iter().find_map(|s| {
+                (s.agent == placeholder.agent
+                    && s.cwd == placeholder.cwd
+                    && s.timestamp >= placeholder.timestamp
+                    && !self.running.contains_key(&s.id))
+                .then(|| s.id.clone())
+            });
+            let Some(real_id) = real_id else {
+                return true;
+            };
+            if let Some(run_id) = self.running.remove(&placeholder.id) {
+                self.running.insert(real_id.clone(), run_id);
+            }
+            if selected_id.as_deref() == Some(placeholder.id.as_str()) {
+                selected_id = Some(real_id);
+            }
+            false
+        });
+
+        let mut next = live;
         next.extend(scanned);
         self.sessions = next;
         if let Some(id) = selected_id
@@ -398,6 +443,13 @@ impl App {
         if let Some(&run_id) = self.running.get(&meta.id) {
             self.attached = Some(run_id);
             self.focus = Focus::Terminal;
+            return Vec::new();
+        }
+        // Same trap as the launch picker: portable-pty falls back to
+        // $HOME for a missing cwd and the agent would resume against
+        // the wrong tree.
+        if !std::path::Path::new(&meta.cwd).is_dir() {
+            self.notice = Some(format!("directory no longer exists: {}", meta.cwd));
             return Vec::new();
         }
         let run_id = self.next_run_id;
