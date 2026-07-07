@@ -96,9 +96,10 @@ fn session_reports_busy_after_recent_output_and_idle_when_quiet() {
 }
 
 #[test]
-fn kill_terminates_a_running_child() {
+fn kill_terminates_and_reaps_the_child() {
     let mut session = PtySession::spawn(&sh("sleep 100"), 24, 80).unwrap();
     assert!(session.is_running());
+    let pid = session.child_pid().expect("child should have a pid");
 
     session.kill().unwrap();
 
@@ -106,6 +107,19 @@ fn kill_terminates_a_running_child() {
         wait_for(|| !session.is_running(), Duration::from_secs(5)),
         "child still running after kill"
     );
+    // The child must be reaped, not left as a zombie until app exit.
+    let reaped = wait_for(
+        || {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            // reaped: ps finds nothing; or at least not a zombie
+            out.stdout.is_empty() || !String::from_utf8_lossy(&out.stdout).contains('Z')
+        },
+        Duration::from_secs(5),
+    );
+    assert!(reaped, "killed child left as a zombie");
 }
 
 #[test]

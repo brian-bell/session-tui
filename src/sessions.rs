@@ -186,7 +186,15 @@ fn title_from_content(content: &Value) -> Option<String> {
 }
 
 fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or("").trim().to_string()
+    // Transcript content is untrusted: keep the display-only title free
+    // of ANSI/OSC control bytes regardless of how the UI renders it.
+    text.lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {

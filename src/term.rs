@@ -159,7 +159,16 @@ impl PtySession {
     }
 
     pub fn kill(&mut self) -> Result<()> {
-        self.child.kill().context("kill child")
+        self.child.kill().context("kill child")?;
+        // Reap immediately: dropping the handle without waiting leaves
+        // a zombie until the app exits (portable-pty wraps
+        // std::process::Child on Unix, whose Drop does not wait).
+        let _ = self.child.wait();
+        Ok(())
+    }
+
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.process_id()
     }
 
     /// How long since the child last produced output.

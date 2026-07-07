@@ -119,6 +119,29 @@ fn title_skips_synthetic_command_messages() {
 }
 
 #[test]
+fn titles_never_carry_control_characters() {
+    // Transcript content is untrusted; a prompt full of ANSI/OSC bytes
+    // must not survive into the (display-only) title.
+    let root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        root.path(),
+        "-Users-brian-dev-myproj",
+        "dddd1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "evil \x1b]0;pwned\x07 title \x1b[31mred\tend",
+        "2026-07-01T15:34:02.390Z",
+    );
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert!(
+        !sessions[0].title.chars().any(|c| c.is_control()),
+        "title still has control chars: {:?}",
+        sessions[0].title
+    );
+}
+
+#[test]
 fn merged_list_is_sorted_newest_first_across_agents() {
     let claude_root = tempfile::tempdir().unwrap();
     let codex_root = tempfile::tempdir().unwrap();
