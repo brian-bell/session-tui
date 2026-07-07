@@ -96,6 +96,27 @@ fn session_reports_busy_after_recent_output_and_idle_when_quiet() {
 }
 
 #[test]
+fn modes_reflect_the_dec_private_modes_the_child_sets() {
+    use session_tui::term::TermModes;
+
+    // A child that never touches DEC modes reports the defaults.
+    let plain = PtySession::spawn(&sh("printf 'up'; sleep 100"), 24, 80).unwrap();
+    assert!(wait_for(|| plain.screen_text().contains("up"), Duration::from_secs(5)));
+    assert_eq!(plain.modes(), TermModes::default());
+
+    // DECCKM (?1h) and bracketed paste (?2004h) show up once the
+    // emulator has processed the escape sequences.
+    let session =
+        PtySession::spawn(&sh("printf '\\033[?1h\\033[?2004h'; printf 'ready'; sleep 100"), 24, 80)
+            .unwrap();
+    assert!(wait_for(|| session.screen_text().contains("ready"), Duration::from_secs(5)));
+    assert_eq!(
+        session.modes(),
+        TermModes { app_cursor: true, bracketed_paste: true }
+    );
+}
+
+#[test]
 fn kill_terminates_and_reaps_the_child() {
     let mut session = PtySession::spawn(&sh("sleep 100"), 24, 80).unwrap();
     assert!(session.is_running());

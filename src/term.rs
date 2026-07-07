@@ -27,14 +27,19 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     pub fn resume(meta: &SessionMeta) -> Self {
-        let args = match meta.agent {
-            Agent::Claude => vec!["--resume".into(), meta.id.clone()],
-            Agent::Codex => vec!["resume".into(), meta.id.clone()],
+        Self::resume_id(meta.agent, &meta.id, &meta.cwd)
+    }
+
+    /// Resume transcript `id` with the matching agent CLI in `cwd`.
+    pub fn resume_id(agent: Agent, id: &str, cwd: &str) -> Self {
+        let args = match agent {
+            Agent::Claude => vec!["--resume".into(), id.to_string()],
+            Agent::Codex => vec!["resume".into(), id.to_string()],
         };
         Self {
-            program: program_for(meta.agent),
+            program: program_for(agent),
             args,
-            cwd: meta.cwd.clone(),
+            cwd: cwd.to_string(),
         }
     }
 
@@ -45,6 +50,17 @@ impl CommandSpec {
             cwd: cwd.into(),
         }
     }
+}
+
+/// DEC private modes the child has set, sampled from the emulator.
+/// Crosses the App seam as a value: the state machine holds no synced
+/// mode state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TermModes {
+    /// DECCKM (application cursor): unmodified arrows encode as SS3.
+    pub app_cursor: bool,
+    /// DECSET 2004: pastes get bracketed-paste delimiters.
+    pub bracketed_paste: bool,
 }
 
 /// Whether a running agent is actively producing output or waiting.
@@ -206,13 +222,13 @@ impl PtySession {
         self.parser.lock().unwrap().screen_mut().set_scrollback(rows);
     }
 
-    /// Whether the child enabled bracketed paste (DECSET 2004).
-    pub fn bracketed_paste(&self) -> bool {
-        self.parser.lock().unwrap().screen().bracketed_paste()
-    }
-
-    /// Whether the child enabled application cursor mode (DECCKM).
-    pub fn application_cursor(&self) -> bool {
-        self.parser.lock().unwrap().screen().application_cursor()
+    /// The DEC private modes the child has set right now.
+    pub fn modes(&self) -> TermModes {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        TermModes {
+            app_cursor: screen.application_cursor(),
+            bracketed_paste: screen.bracketed_paste(),
+        }
     }
 }

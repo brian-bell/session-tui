@@ -17,7 +17,7 @@ use ratatui::Terminal;
 
 use session_tui::app::{App, Effect, RunId};
 use session_tui::sessions::{scan_all_sessions, ScanRoots, SessionMeta};
-use session_tui::term::PtySession;
+use session_tui::term::{PtySession, TermModes};
 use session_tui::ui;
 
 enum Event {
@@ -77,7 +77,6 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
 
         if let Some(pty) = app.attached_run().and_then(|id| ptys.get(&id)) {
             pty.set_scrollback(app.scroll_offset);
-            app.app_cursor = pty.application_cursor();
         }
         let statuses: HashMap<RunId, _> =
             ptys.iter().map(|(&id, p)| (id, p.status())).collect();
@@ -93,14 +92,12 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
         for event in std::iter::once(first).chain(rx.try_iter()) {
             let effects = match event {
                 Event::Input(CtEvent::Key(k)) if k.kind != KeyEventKind::Release => {
-                    app.handle_key(k)
+                    let modes = attached_modes(&app, &ptys);
+                    app.handle_key(k, modes)
                 }
                 Event::Input(CtEvent::Paste(text)) => {
-                    let bracketed = app
-                        .attached_run()
-                        .and_then(|id| ptys.get(&id))
-                        .is_some_and(|p| p.bracketed_paste());
-                    app.handle_paste(&text, bracketed)
+                    let modes = attached_modes(&app, &ptys);
+                    app.handle_paste(&text, modes)
                 }
                 Event::Input(CtEvent::Resize(w, h)) => {
                     let (rows, cols) = ui::terminal_pane_size(Rect::new(0, 0, w, h));
@@ -122,6 +119,15 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
             }
         }
     }
+}
+
+/// The attached child's DEC modes, sampled at event time so a key or
+/// paste is encoded for the modes the child has right now.
+fn attached_modes(app: &App, ptys: &HashMap<RunId, PtySession>) -> TermModes {
+    app.attached_run()
+        .and_then(|id| ptys.get(&id))
+        .map(|p| p.modes())
+        .unwrap_or_default()
 }
 
 /// Apply one effect; returns false when the app should exit.

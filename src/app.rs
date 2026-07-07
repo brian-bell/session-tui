@@ -1,103 +1,11 @@
-use std::collections::HashMap;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-fn is_focus_toggle(key: &KeyEvent) -> bool {
-    // Ctrl+\ arrives as Char('\\') under the kitty protocol but as
-    // Char('4') from legacy terminals (crossterm maps byte 0x1C that way).
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
-}
-
-/// Translate a crossterm key event into the bytes a terminal would
-/// send. `app_cursor` is the child's DECCKM mode: unmodified arrows
-/// become SS3 (ESC O x) instead of CSI (ESC [ x).
-fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    // Modified arrows use the xterm CSI 1;<mod> scheme:
-    // 2=Shift, 3=Alt, 5=Ctrl (and their sums).
-    if let Some(arrow) = match key.code {
-        KeyCode::Up => Some(b'A'),
-        KeyCode::Down => Some(b'B'),
-        KeyCode::Right => Some(b'C'),
-        KeyCode::Left => Some(b'D'),
-        _ => None,
-    } {
-        let mut modifier = 1;
-        if key.modifiers.contains(KeyModifiers::SHIFT) {
-            modifier += 1;
-        }
-        if key.modifiers.contains(KeyModifiers::ALT) {
-            modifier += 2;
-        }
-        if ctrl {
-            modifier += 4;
-        }
-        if modifier > 1 {
-            return Some(format!("\x1b[1;{}{}", modifier, arrow as char).into_bytes());
-        }
-        if app_cursor {
-            return Some(vec![0x1b, b'O', arrow]);
-        }
-    }
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        // Meta convention: ESC-prefix the unmodified encoding.
-        let stripped = KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
-        return encode_key(&stripped, app_cursor).map(|mut bytes| {
-            bytes.insert(0, 0x1b);
-            bytes
-        });
-    }
-    Some(match key.code {
-        KeyCode::Char(c) if ctrl => {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_lowercase() {
-                // Ctrl+A..Ctrl+Z map to 0x01..0x1a
-                vec![c as u8 - b'a' + 1]
-            } else {
-                // Non-letter control bytes. Legacy terminals deliver
-                // 0x1d..0x1f as Ctrl+5..Ctrl+7 (0x1c/Ctrl+4 is the
-                // focus toggle and never reaches here).
-                match c {
-                    ' ' | '@' => vec![0x00],
-                    '[' => vec![0x1b],
-                    ']' | '5' => vec![0x1d],
-                    '^' | '6' => vec![0x1e],
-                    '_' | '7' | '/' => vec![0x1f],
-                    '?' => vec![0x7f],
-                    _ => return None,
-                }
-            }
-        }
-        KeyCode::Char(c) => c.to_string().into_bytes(),
-        KeyCode::Enter => b"\r".to_vec(),
-        KeyCode::Esc => b"\x1b".to_vec(),
-        KeyCode::Backspace => b"\x7f".to_vec(),
-        KeyCode::Tab => b"\t".to_vec(),
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::F(n @ 1..=4) => vec![0x1b, b'O', b'P' + n - 1],
-        KeyCode::F(n @ 5..=12) => {
-            // xterm numbering skips 16 and 22.
-            let code = [15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5];
-            format!("\x1b[{code}~").into_bytes()
-        }
-        _ => return None,
-    })
-}
-
+use crate::input;
+use crate::roster::Roster;
 use crate::sessions::{Agent, SessionMeta};
-use crate::term::CommandSpec;
+use crate::term::{CommandSpec, TermModes};
 
-/// Identifies one live PTY for the lifetime of the app.
-pub type RunId = u64;
+pub use crate::roster::RunId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -176,8 +84,6 @@ impl PickerState {
 }
 
 pub struct App {
-    pub sessions: Vec<SessionMeta>,
-    pub selected: usize,
     pub focus: Focus,
     pub overlay: Overlay,
     /// Lines scrolled back from live output; 0 = following live.
@@ -185,38 +91,28 @@ pub struct App {
     /// One-shot user-facing message (e.g. why an action was refused);
     /// cleared on the next keypress.
     pub notice: Option<String>,
-    /// Attached child's DECCKM (application cursor) mode, synced from
-    /// the emulator by the main loop; arrows encode as SS3 when set.
-    pub app_cursor: bool,
-    /// session id -> live run
-    running: HashMap<String, RunId>,
-    /// live-id -> transcript ids that already existed at launch time;
-    /// only a transcript outside this set may be adopted as the
-    /// provisional session's real identity.
-    launch_snapshots: HashMap<String, std::collections::HashSet<String>>,
+    roster: Roster,
     attached: Option<RunId>,
-    next_run_id: RunId,
 }
 
 impl App {
     pub fn new(sessions: Vec<SessionMeta>) -> Self {
         Self {
-            sessions,
-            selected: 0,
             focus: Focus::List,
             overlay: Overlay::None,
             scroll_offset: 0,
             notice: None,
-            app_cursor: false,
-            running: HashMap::new(),
-            launch_snapshots: HashMap::new(),
+            roster: Roster::new(sessions),
             attached: None,
-            next_run_id: 1,
         }
     }
 
+    pub fn roster(&self) -> &Roster {
+        &self.roster
+    }
+
     pub fn is_running(&self, run_id: RunId) -> bool {
-        self.running.values().any(|&r| r == run_id)
+        self.roster.is_running(run_id)
     }
 
     pub fn attached_run(&self) -> Option<RunId> {
@@ -224,7 +120,11 @@ impl App {
     }
 
     pub fn run_id_for(&self, session_id: &str) -> Option<RunId> {
-        self.running.get(session_id).copied()
+        self.roster
+            .rows()
+            .iter()
+            .find(|r| r.transcript_id() == Some(session_id))
+            .and_then(|r| r.run_id())
     }
 
     /// Show `run_id` in the terminal pane, always starting at live
@@ -236,33 +136,12 @@ impl App {
     }
 
     pub fn has_running_sessions(&self) -> bool {
-        !self.running.is_empty()
+        self.roster.has_running()
     }
 
     /// The child process behind `run_id` ended (exit or kill).
     pub fn mark_exited(&mut self, run_id: RunId) {
-        let session_ids: Vec<String> = self
-            .running
-            .iter()
-            .filter(|&(_, &r)| r == run_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-        self.running.retain(|_, &mut r| r != run_id);
-        // A provisional row has no transcript to resume; once its
-        // process is gone the row is meaningless. Selection follows
-        // the selected session's identity, not its old index.
-        let selected_id = self.sessions.get(self.selected).map(|m| m.id.clone());
-        self.sessions
-            .retain(|m| !(m.id.starts_with("live-") && session_ids.contains(&m.id)));
-        for id in &session_ids {
-            self.launch_snapshots.remove(id);
-        }
-        if let Some(id) = selected_id
-            && let Some(pos) = self.sessions.iter().position(|m| m.id == id)
-        {
-            self.selected = pos;
-        }
-        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+        self.roster.mark_exited(run_id);
         if self.attached == Some(run_id) {
             self.attached = None;
             self.focus = Focus::List;
@@ -270,11 +149,9 @@ impl App {
         }
     }
 
-    /// Forward pasted text to the attached terminal. `bracketed` is
-    /// whether the child enabled bracketed paste (DECSET 2004, tracked
-    /// by the emulator); without it the delimiters would be literal
-    /// garbage in the child's input.
-    pub fn handle_paste(&mut self, text: &str, bracketed: bool) -> Vec<Effect> {
+    /// Forward pasted text to the attached terminal, encoded for the
+    /// child's modes (bracketed paste only when it enabled DECSET 2004).
+    pub fn handle_paste(&mut self, text: &str, modes: TermModes) -> Vec<Effect> {
         // A paste while the launch picker is open is a project path.
         if let Overlay::LaunchPicker(ref mut picker) = self.overlay {
             picker.input.extend(text.chars().filter(|c| !c.is_control()));
@@ -285,30 +162,22 @@ impl App {
         let (Focus::Terminal, Some(run_id)) = (self.focus, self.attached) else {
             return Vec::new();
         };
-        let bytes = if bracketed {
-            let mut b = b"\x1b[200~".to_vec();
-            b.extend_from_slice(text.as_bytes());
-            b.extend_from_slice(b"\x1b[201~");
-            b
-        } else {
-            text.as_bytes().to_vec()
-        };
         self.scroll_offset = 0;
-        vec![Effect::WriteTerminal { run_id, bytes }]
+        vec![Effect::WriteTerminal { run_id, bytes: input::encode_paste(text, modes) }]
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+    pub fn handle_key(&mut self, key: KeyEvent, modes: TermModes) -> Vec<Effect> {
         self.notice = None;
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
         }
-        if is_focus_toggle(&key) {
+        if input::is_focus_toggle(&key) {
             self.toggle_focus();
             return Vec::new();
         }
         match self.focus {
             Focus::List => self.handle_list_key(key),
-            Focus::Terminal => self.handle_terminal_key(key),
+            Focus::Terminal => self.handle_terminal_key(key, modes),
         }
     }
 
@@ -408,102 +277,15 @@ impl App {
     /// Spawn a fresh agent and put a provisional entry on top of the
     /// list; the real transcript will appear via rescans later.
     fn launch_new(&mut self, agent: Agent, cwd: &str) -> Vec<Effect> {
-        let run_id = self.next_run_id;
-        self.next_run_id += 1;
-        // Transcripts already on disk belong to other sessions; only a
-        // transcript first seen after this launch may be adopted.
-        self.launch_snapshots.insert(
-            format!("live-{run_id}"),
-            self.sessions.iter().map(|m| m.id.clone()).collect(),
-        );
-        let meta = SessionMeta {
-            id: format!("live-{run_id}"),
-            agent,
-            cwd: cwd.to_string(),
-            title: "(new session)".to_string(),
-            timestamp: chrono::Utc::now(),
-        };
-        let spec = CommandSpec::launch(agent, cwd);
-        self.running.insert(meta.id.clone(), run_id);
-        self.sessions.insert(0, meta);
-        self.selected = 0;
+        let (run_id, spec) = self.roster.launch(agent, cwd);
         self.attach(run_id);
         vec![Effect::Spawn { run_id, spec }]
     }
 
-    /// Recently used project dirs, newest first, deduped.
-    fn known_dirs(&self) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
-        self.sessions
-            .iter()
-            .filter(|m| !m.id.starts_with("live-"))
-            .map(|m| m.cwd.clone())
-            .filter(|d| seen.insert(d.clone()))
-            .collect()
-    }
-
-    /// Replace the scanned session list (from a rescan), following the
-    /// selected session by identity rather than position. Provisional
-    /// live entries survive only while their process runs, and are
-    /// adopted by the real transcript once the scanner finds it.
+    /// Replace the scanned session list (from a rescan); the roster
+    /// keeps provisional rows alive and adopts their transcripts.
     pub fn update_sessions(&mut self, scanned: Vec<SessionMeta>) {
-        let mut selected_id = self.sessions.get(self.selected).map(|m| m.id.clone());
-
-        let mut live: Vec<SessionMeta> = self
-            .sessions
-            .iter()
-            .filter(|m| m.id.starts_with("live-") && self.running.contains_key(&m.id))
-            .cloned()
-            .collect();
-
-        // Adopt: a scanned transcript by the same agent, in the same
-        // cwd, first seen after the launch is this provisional
-        // session's real identity. Move the live PTY over and drop the
-        // placeholder so the session shows exactly once. Adoption must
-        // be unambiguous — with two same-cwd placeholders or two new
-        // transcripts, mtimes can't say which process wrote which file,
-        // and guessing would bind kill/attach to the wrong terminal.
-        let mut siblings: HashMap<(Agent, String), usize> = HashMap::new();
-        for p in &live {
-            *siblings.entry((p.agent, p.cwd.clone())).or_default() += 1;
-        }
-        live.retain(|placeholder| {
-            if siblings[&(placeholder.agent, placeholder.cwd.clone())] > 1 {
-                return true;
-            }
-            let known_at_launch = self.launch_snapshots.get(&placeholder.id);
-            let candidates: Vec<&SessionMeta> = scanned
-                .iter()
-                .filter(|s| {
-                    s.agent == placeholder.agent
-                        && s.cwd == placeholder.cwd
-                        && s.timestamp >= placeholder.timestamp
-                        && !self.running.contains_key(&s.id)
-                        && known_at_launch.is_none_or(|known| !known.contains(&s.id))
-                })
-                .collect();
-            let [candidate] = candidates[..] else {
-                return true;
-            };
-            let real_id = candidate.id.clone();
-            if let Some(run_id) = self.running.remove(&placeholder.id) {
-                self.running.insert(real_id.clone(), run_id);
-            }
-            self.launch_snapshots.remove(&placeholder.id);
-            if selected_id.as_deref() == Some(placeholder.id.as_str()) {
-                selected_id = Some(real_id);
-            }
-            false
-        });
-
-        let mut next = live;
-        next.extend(scanned);
-        self.sessions = next;
-        if let Some(id) = selected_id
-            && let Some(pos) = self.sessions.iter().position(|m| m.id == id) {
-                self.selected = pos;
-            }
-        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+        self.roster.absorb_scan(scanned);
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -511,51 +293,39 @@ impl App {
         match key.code {
             KeyCode::Enter => self.activate_selected(),
             KeyCode::Char('q') => {
-                if self.running.is_empty() {
-                    vec![Effect::Quit]
-                } else {
+                if self.roster.has_running() {
                     self.overlay = Overlay::ConfirmQuit;
                     Vec::new()
+                } else {
+                    vec![Effect::Quit]
                 }
             }
             KeyCode::Char('n') => {
-                self.overlay = Overlay::LaunchPicker(PickerState::new(self.known_dirs()));
+                self.overlay = Overlay::LaunchPicker(PickerState::new(self.roster.known_dirs()));
                 Vec::new()
             }
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(&run_id) = self
-                    .sessions
-                    .get(self.selected)
-                    .and_then(|m| self.running.get(&m.id))
-                {
+                if let Some(run_id) = self.roster.selected_row().and_then(|r| r.run_id()) {
                     self.overlay = Overlay::ConfirmKill { run_id };
                 }
                 Vec::new()
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.move_selection(1);
+                self.roster.move_selection(1);
                 Vec::new()
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.move_selection(-1);
+                self.roster.move_selection(-1);
                 Vec::new()
             }
             _ => Vec::new(),
         }
     }
 
-    fn move_selection(&mut self, delta: isize) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        let last = self.sessions.len() - 1;
-        self.selected = self.selected.saturating_add_signed(delta).min(last);
-    }
-
     /// Lines jumped per PageUp/PageDown while scrolled back.
     const SCROLL_STEP: usize = 20;
 
-    fn handle_terminal_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+    fn handle_terminal_key(&mut self, key: KeyEvent, modes: TermModes) -> Vec<Effect> {
         let Some(run_id) = self.attached else {
             return Vec::new();
         };
@@ -572,7 +342,7 @@ impl App {
             }
             _ => self.scroll_offset = 0,
         }
-        match encode_key(&key, self.app_cursor) {
+        match input::encode_key(&key, modes) {
             Some(bytes) => vec![Effect::WriteTerminal { run_id, bytes }],
             None => Vec::new(),
         }
@@ -580,24 +350,25 @@ impl App {
 
     /// Resume the selected session (or attach if it's already running).
     fn activate_selected(&mut self) -> Vec<Effect> {
-        let Some(meta) = self.sessions.get(self.selected) else {
+        let Some(row) = self.roster.selected_row() else {
             return Vec::new();
         };
-        if let Some(&run_id) = self.running.get(&meta.id) {
+        if let Some(run_id) = row.run_id() {
             self.attach(run_id);
             return Vec::new();
         }
         // Same trap as the launch picker: portable-pty falls back to
         // $HOME for a missing cwd and the agent would resume against
-        // the wrong tree.
-        if !std::path::Path::new(&meta.cwd).is_dir() {
-            self.notice = Some(format!("directory no longer exists: {}", meta.cwd));
+        // the wrong tree. The roster never touches the filesystem, so
+        // the check lives here.
+        if !std::path::Path::new(row.cwd()).is_dir() {
+            let cwd = row.cwd().to_string();
+            self.notice = Some(format!("directory no longer exists: {cwd}"));
             return Vec::new();
         }
-        let run_id = self.next_run_id;
-        self.next_run_id += 1;
-        let spec = CommandSpec::resume(meta);
-        self.running.insert(meta.id.clone(), run_id);
+        let Some((run_id, spec)) = self.roster.resume_selected() else {
+            return Vec::new();
+        };
         self.attach(run_id);
         vec![Effect::Spawn { run_id, spec }]
     }
