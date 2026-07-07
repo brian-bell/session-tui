@@ -196,4 +196,9 @@ impl PtySession {
     pub fn set_scrollback(&self, rows: usize) {
         self.parser.lock().unwrap().screen_mut().set_scrollback(rows);
     }
+
+    /// Whether the child enabled bracketed paste (DECSET 2004).
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser.lock().unwrap().screen().bracketed_paste()
+    }
 }

@@ -448,12 +448,13 @@ fn a_session_whose_child_exits_detaches_and_stops_showing_as_running() {
 }
 
 #[test]
-fn paste_reaches_the_terminal_as_a_bracketed_paste() {
+fn paste_is_bracketed_only_when_the_child_enabled_bracketed_paste() {
     let mut app = App::new(vec![meta("s1", "one")]);
     app.handle_key(key(KeyCode::Enter));
     let run_id = app.attached_run().unwrap();
 
-    let effects = app.handle_paste("hello\nworld");
+    // Child requested bracketed paste (DECSET 2004): wrap.
+    let effects = app.handle_paste("hello\nworld", true);
     assert_eq!(
         effects,
         vec![Effect::WriteTerminal {
@@ -462,9 +463,16 @@ fn paste_reaches_the_terminal_as_a_bracketed_paste() {
         }]
     );
 
+    // Child did not: the delimiters would arrive as literal input.
+    let effects = app.handle_paste("hello", false);
+    assert_eq!(
+        effects,
+        vec![Effect::WriteTerminal { run_id, bytes: b"hello".to_vec() }]
+    );
+
     // Pasting while the list is focused does nothing.
     app.handle_key(ctrl('\\'));
-    assert!(app.handle_paste("x").is_empty());
+    assert!(app.handle_paste("x", true).is_empty());
 }
 
 #[test]

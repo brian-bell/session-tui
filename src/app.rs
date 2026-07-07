@@ -205,14 +205,22 @@ impl App {
         }
     }
 
-    /// Forward pasted text to the attached terminal as a bracketed paste.
-    pub fn handle_paste(&mut self, text: &str) -> Vec<Effect> {
+    /// Forward pasted text to the attached terminal. `bracketed` is
+    /// whether the child enabled bracketed paste (DECSET 2004, tracked
+    /// by the emulator); without it the delimiters would be literal
+    /// garbage in the child's input.
+    pub fn handle_paste(&mut self, text: &str, bracketed: bool) -> Vec<Effect> {
         let (Focus::Terminal, Some(run_id)) = (self.focus, self.attached) else {
             return Vec::new();
         };
-        let mut bytes = b"\x1b[200~".to_vec();
-        bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(b"\x1b[201~");
+        let bytes = if bracketed {
+            let mut b = b"\x1b[200~".to_vec();
+            b.extend_from_slice(text.as_bytes());
+            b.extend_from_slice(b"\x1b[201~");
+            b
+        } else {
+            text.as_bytes().to_vec()
+        };
         self.scroll_offset = 0;
         vec![Effect::WriteTerminal { run_id, bytes }]
     }

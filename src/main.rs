@@ -94,7 +94,13 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
                 Event::Input(CtEvent::Key(k)) if k.kind != KeyEventKind::Release => {
                     app.handle_key(k)
                 }
-                Event::Input(CtEvent::Paste(text)) => app.handle_paste(&text),
+                Event::Input(CtEvent::Paste(text)) => {
+                    let bracketed = app
+                        .attached_run()
+                        .and_then(|id| ptys.get(&id))
+                        .is_some_and(|p| p.bracketed_paste());
+                    app.handle_paste(&text, bracketed)
+                }
                 Event::Input(CtEvent::Resize(w, h)) => {
                     let (rows, cols) = ui::terminal_pane_size(Rect::new(0, 0, w, h));
                     for pty in ptys.values_mut() {
