@@ -27,14 +27,19 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     pub fn resume(meta: &SessionMeta) -> Self {
-        let args = match meta.agent {
-            Agent::Claude => vec!["--resume".into(), meta.id.clone()],
-            Agent::Codex => vec!["resume".into(), meta.id.clone()],
+        Self::resume_id(meta.agent, &meta.id, &meta.cwd)
+    }
+
+    /// Resume transcript `id` with the matching agent CLI in `cwd`.
+    pub fn resume_id(agent: Agent, id: &str, cwd: &str) -> Self {
+        let args = match agent {
+            Agent::Claude => vec!["--resume".into(), id.to_string()],
+            Agent::Codex => vec!["resume".into(), id.to_string()],
         };
         Self {
-            program: program_for(meta.agent),
+            program: program_for(agent),
             args,
-            cwd: meta.cwd.clone(),
+            cwd: cwd.to_string(),
         }
     }
 

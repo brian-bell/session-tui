@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -9,7 +9,8 @@ use tui_term::widget::PseudoTerminal;
 use std::collections::HashMap;
 
 use crate::app::{App, Focus, Overlay, PickerState, RunId};
-use crate::sessions::{Agent, SessionMeta};
+use crate::roster::Row;
+use crate::sessions::Agent;
 use crate::term::SessionStatus;
 
 /// Fraction of the frame given to the session list.
@@ -55,37 +56,34 @@ fn render_list(f: &mut Frame, app: &App, statuses: &HashMap<RunId, SessionStatus
         .border_style(border_style(focused));
 
     let items: Vec<ListItem> = app
-        .sessions
+        .roster()
+        .rows()
         .iter()
-        .map(|m| ListItem::new(session_line(app, m, statuses)))
+        .map(|r| ListItem::new(session_line(r, statuses)))
         .collect();
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
-    let mut state = ListState::default().with_selected(Some(app.selected));
+    let mut state = ListState::default().with_selected(Some(app.roster().selected()));
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn session_line<'a>(
-    app: &App,
-    m: &'a SessionMeta,
-    statuses: &HashMap<RunId, SessionStatus>,
-) -> Line<'a> {
-    let (icon, icon_color) = match m.agent {
+fn session_line<'a>(row: &'a Row, statuses: &HashMap<RunId, SessionStatus>) -> Line<'a> {
+    let (icon, icon_color) = match row.agent() {
         Agent::Claude => ("●", Color::LightMagenta),
         Agent::Codex => ("○", Color::LightCyan),
     };
-    let marker = match app.run_id_for(&m.id).map(|id| statuses.get(&id)) {
+    let marker = match row.run_id().map(|id| statuses.get(&id)) {
         Some(Some(SessionStatus::Busy)) => "⚡",
         Some(_) => "▶", // running, idle (or status not sampled yet)
         None => " ",
     };
-    let project = sanitize(m.cwd.rsplit('/').next().unwrap_or(""));
+    let project = sanitize(row.cwd().rsplit('/').next().unwrap_or(""));
     Line::from(vec![
         Span::styled(format!("{marker}{icon} "), Style::default().fg(icon_color)),
-        Span::raw(sanitize(&m.title)),
+        Span::raw(sanitize(row.title())),
         Span::styled(
-            format!("  {} · {}", project, relative_time(m)),
+            format!("  {} · {}", project, relative_time(row.timestamp())),
             Style::default().fg(Color::DarkGray),
         ),
     ])
@@ -97,8 +95,8 @@ fn sanitize(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
-fn relative_time(m: &SessionMeta) -> String {
-    let delta = Utc::now() - m.timestamp;
+fn relative_time(timestamp: DateTime<Utc>) -> String {
+    let delta = Utc::now() - timestamp;
     if delta.num_days() > 0 {
         format!("{}d", delta.num_days())
     } else if delta.num_hours() > 0 {

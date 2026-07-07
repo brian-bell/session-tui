@@ -56,14 +56,14 @@ fn ctrl_backslash_toggles_focus_and_terminal_mode_passes_keys_through() {
         effects,
         vec![Effect::WriteTerminal { run_id, bytes: b"j".to_vec() }]
     );
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.roster().selected(), 0);
 
     // Ctrl+\ returns to the list; 'j' now moves the selection
     app.handle_key(ctrl('\\'));
     assert_eq!(app.focus, Focus::List);
     let effects = app.handle_key(key(KeyCode::Char('j')));
     assert!(effects.is_empty());
-    assert_eq!(app.selected, 1);
+    assert_eq!(app.roster().selected(), 1);
 
     // Ctrl+\ toggles back into the attached terminal
     app.handle_key(ctrl('\\'));
@@ -159,8 +159,9 @@ fn launch_picker_starts_a_fresh_agent_in_a_known_project_dir() {
     assert_eq!(app.overlay, Overlay::None);
     assert_eq!(app.focus, Focus::Terminal);
     // A provisional entry for the new session tops the list.
-    assert_eq!(app.sessions[0].cwd, expected_b);
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.roster().rows()[0].cwd(), expected_b);
+    assert!(app.roster().rows()[0].is_provisional());
+    assert_eq!(app.roster().selected(), 0);
 }
 
 #[test]
@@ -202,7 +203,7 @@ fn launch_uses_the_canonical_path_so_adoption_can_match_transcripts() {
         }
         other => panic!("expected Spawn, got {other:?}"),
     }
-    assert_eq!(app.sessions[0].cwd, canonical.to_str().unwrap());
+    assert_eq!(app.roster().rows()[0].cwd(), canonical.to_str().unwrap());
 }
 
 #[test]
@@ -281,32 +282,6 @@ fn launch_picker_refuses_a_directory_that_does_not_exist() {
 }
 
 #[test]
-fn rescan_preserves_selection_and_provisional_live_entries() {
-    let mut app = App::new(vec![meta("s1", "one"), meta("s2", "two")]);
-    app.handle_key(key(KeyCode::Down)); // select s2
-
-    // A launch adds a provisional entry on top.
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Enter));
-    app.handle_key(ctrl('\\'));
-    let provisional_id = app.sessions[0].id.clone();
-
-    // A rescan of only pre-launch transcripts (the new agent hasn't
-    // written its own yet) must keep the provisional row on top.
-    let old = |id, title| {
-        let mut m = meta(id, title);
-        m.timestamp = chrono::Utc::now() - chrono::Duration::hours(1);
-        m
-    };
-    app.update_sessions(vec![old("s3", "newest"), old("s1", "one"), old("s2", "two")]);
-
-    assert_eq!(app.sessions[0].id, provisional_id, "live entry stays on top");
-    assert_eq!(app.sessions[1].id, "s3");
-    // Selection follows the provisional session we launched, not an index.
-    assert_eq!(app.sessions[app.selected].id, provisional_id);
-}
-
-#[test]
 fn page_up_scrolls_back_and_any_other_key_snaps_to_live() {
     let mut app = App::new(vec![meta("s1", "one")]);
     app.handle_key(key(KeyCode::Enter));
@@ -346,107 +321,10 @@ fn resume_refuses_a_session_whose_cwd_no_longer_exists() {
     assert!(app.notice.is_some(), "user should see why nothing happened");
 }
 
-#[test]
-fn provisional_entry_disappears_when_its_process_exits() {
-    let mut app = App::new(vec![meta("s1", "one")]);
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Enter)); // launch in known dir (/tmp)
-    let run_id = app.attached_run().unwrap();
-    assert!(app.sessions[0].id.starts_with("live-"));
-
-    app.mark_exited(run_id);
-    assert!(
-        !app.sessions.iter().any(|m| m.id.starts_with("live-")),
-        "stale provisional rows must not linger (they can't be resumed)"
-    );
-
-    // And a rescan must not resurrect anything either.
-    app.update_sessions(vec![meta("s1", "one")]);
-    assert!(!app.sessions.iter().any(|m| m.id.starts_with("live-")));
-}
-
-#[test]
-fn adoption_ignores_transcripts_that_existed_before_the_launch() {
-    // Another session in the same cwd, active outside this TUI, gets
-    // its mtime bumped after our launch. It must not steal the
-    // provisional row: only a transcript we had never seen qualifies.
-    let canonical_tmp = std::fs::canonicalize("/tmp")
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let mut outside = meta("outside-id", "unrelated session");
-    outside.cwd = canonical_tmp.clone();
-
-    let mut app = App::new(vec![outside.clone()]);
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Enter)); // launch in /tmp
-    let run_id = app.attached_run().unwrap();
-
-    // Rescan: the pre-existing transcript now has a newer mtime.
-    outside.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
-    app.update_sessions(vec![outside.clone()]);
-    assert_eq!(
-        app.run_id_for("outside-id"),
-        None,
-        "a transcript known before launch must not be adopted"
-    );
-    assert!(app.sessions.iter().any(|m| m.id.starts_with("live-")));
-
-    // A genuinely new transcript still adopts.
-    let mut fresh = meta("fresh-id", "the launched session");
-    fresh.cwd = canonical_tmp;
-    fresh.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
-    app.update_sessions(vec![fresh, outside]);
-    assert_eq!(app.run_id_for("fresh-id"), Some(run_id));
-}
-
-#[test]
-fn adoption_holds_off_while_the_match_is_ambiguous() {
-    let canonical_tmp = std::fs::canonicalize("/tmp")
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-
-    // Two provisional launches in the same agent+cwd: a single new
-    // transcript cannot be attributed to either process.
-    let mut app = App::new(vec![meta("s1", "one")]);
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Enter));
-    app.handle_key(ctrl('\\'));
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Enter));
-    app.handle_key(ctrl('\\'));
-
-    let mut fresh = meta("fresh-id", "someone's session");
-    fresh.cwd = canonical_tmp.clone();
-    fresh.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
-    app.update_sessions(vec![fresh, meta("s1", "one")]);
-
-    assert_eq!(app.run_id_for("fresh-id"), None, "ambiguous: two placeholders");
-    assert_eq!(
-        app.sessions.iter().filter(|m| m.id.starts_with("live-")).count(),
-        2,
-        "both placeholders must survive until the match is unambiguous"
-    );
-
-    // One placeholder but two candidate transcripts: also ambiguous.
-    let mut app = App::new(vec![meta("s1", "one")]);
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Enter));
-    app.handle_key(ctrl('\\'));
-    let mut c1 = meta("cand-1", "a");
-    c1.cwd = canonical_tmp.clone();
-    c1.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
-    let mut c2 = meta("cand-2", "b");
-    c2.cwd = canonical_tmp;
-    c2.timestamp = chrono::Utc::now() + chrono::Duration::seconds(2);
-    app.update_sessions(vec![c2, c1, meta("s1", "one")]);
-
-    assert_eq!(app.run_id_for("cand-1"), None);
-    assert_eq!(app.run_id_for("cand-2"), None);
-    assert_eq!(app.sessions.iter().filter(|m| m.id.starts_with("live-")).count(), 1);
-}
-
+// The pure adoption permutations (snapshot exclusion, ambiguity
+// hold-offs, provisional-row lifecycle, selection-by-identity) are
+// covered directly in roster_test.rs; this test proves the wiring
+// from picker launch through rescan to re-attach.
 #[test]
 fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
     let mut app = App::new(vec![meta("s1", "one")]);
@@ -466,8 +344,15 @@ fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
     app.update_sessions(vec![real, meta("s1", "one")]);
 
     // One row, not two: the provisional row became the real one.
-    assert!(!app.sessions.iter().any(|m| m.id.starts_with("live-")));
-    assert_eq!(app.sessions.iter().filter(|m| m.id == "real-id").count(), 1);
+    assert!(!app.roster().rows().iter().any(|r| r.is_provisional()));
+    assert_eq!(
+        app.roster()
+            .rows()
+            .iter()
+            .filter(|r| r.transcript_id() == Some("real-id"))
+            .count(),
+        1
+    );
     assert_eq!(
         app.run_id_for("real-id"),
         Some(run_id),
@@ -476,35 +361,18 @@ fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
 
     // Selecting the adopted row re-attaches instead of double-resuming.
     app.handle_key(ctrl('\\'));
-    let pos = app.sessions.iter().position(|m| m.id == "real-id").unwrap();
-    while app.selected < pos {
+    let pos = app
+        .roster()
+        .rows()
+        .iter()
+        .position(|r| r.transcript_id() == Some("real-id"))
+        .unwrap();
+    while app.roster().selected() < pos {
         app.handle_key(key(KeyCode::Down));
     }
     let effects = app.handle_key(key(KeyCode::Enter));
     assert!(effects.is_empty(), "attach must not spawn a second resume");
     assert_eq!(app.attached_run(), Some(run_id));
-}
-
-#[test]
-fn selection_follows_the_session_when_a_live_row_above_it_exits() {
-    let mut app = App::new(vec![meta("s1", "one"), meta("s2", "two")]);
-    // Launch a provisional row (lands on top as index 0).
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Enter));
-    let run_id = app.attached_run().unwrap();
-    app.handle_key(ctrl('\\'));
-
-    // Select s2 (index 2, below the provisional row).
-    app.handle_key(key(KeyCode::Down));
-    app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.sessions[app.selected].id, "s2");
-
-    // The provisional process exits; its row above is removed.
-    app.mark_exited(run_id);
-    assert_eq!(
-        app.sessions[app.selected].id, "s2",
-        "selection must track the session, not the index"
-    );
 }
 
 #[test]

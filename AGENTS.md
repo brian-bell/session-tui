@@ -35,11 +35,18 @@ One binary crate plus a library, `src/`:
   (10k scrollback), and exposes input/resize/kill/status. `CommandSpec`
   builds `claude --resume <id>` / `codex resume <id>` / bare launches.
   `SessionStatus` maps output recency to Busy/Idle (2s threshold).
+- `roster.rs` — the session list and its lifecycle. `Roster` owns the
+  `Row`s (scanned transcripts plus provisional launches), each row's
+  live run, and selection-by-identity. `launch`/`resume_selected`/
+  `mark_exited`/`absorb_scan` are the lifecycle; adoption of a
+  provisional row by its scanned transcript happens in `absorb_scan`
+  under the unambiguity rules below. Never touches the filesystem or a
+  PTY. Domain terms are defined in `CONTEXT.md`.
 - `app.rs` — pure Elm-style state machine. `handle_key`/`handle_paste`
   return `Effect`s (`Spawn`, `WriteTerminal`, `Kill`, `Quit`); it never
-  touches a PTY. Owns focus (List/Terminal), selection, overlays
-  (confirm quit/kill, launch picker), scrollback offset, notices, and
-  the provisional-session ("live-*") lifecycle.
+  touches a PTY. Owns focus (List/Terminal), overlays (confirm
+  quit/kill, launch picker), scrollback offset, notices, and the
+  attached run; delegates session-list state to `roster.rs`.
 - `ui.rs` — ratatui rendering: 25/75 layout, session rows, tui-term
   pane, overlays, help/notice bar. `terminal_pane_size` is the single
   source of PTY dimensions.
@@ -55,12 +62,14 @@ fixtures in `tests/fixtures/mod.rs`.
 - **App stays pure.** All side effects go through `Effect`; the main
   loop is the only place PTYs are created, written, or killed. Keep new
   behavior unit-testable through `handle_key`.
-- **Provisional sessions**: a fresh launch inserts a `live-<run_id>`
-  row with no transcript. On rescan it is *adopted* by a scanned
-  transcript only when unambiguous: same agent + cwd, mtime >= launch,
-  transcript id not in the launch snapshot, exactly one candidate, and
-  no sibling placeholder in the same agent+cwd. Rows are dropped when
-  their process exits (nothing to resume).
+- **Provisional sessions**: a fresh launch inserts a provisional `Row`
+  (`Row::is_provisional`) with no transcript. On rescan it is *adopted*
+  by a scanned transcript only when unambiguous: same agent + cwd,
+  mtime >= launch, transcript id not in the launch snapshot, exactly
+  one candidate, and no sibling placeholder in the same agent+cwd.
+  Provisional rows are dropped when their process exits (nothing to
+  resume); a running transcript row that vanishes from a scan is kept
+  so its PTY stays reattachable.
 - **cwd handling**: picker cwds are canonicalized (transcripts record
   the child's resolved getcwd — `/tmp` is a symlink on macOS). Missing
   cwds are refused on both launch and resume because portable-pty
