@@ -170,4 +170,9 @@ impl PtySession {
     pub fn status(&self) -> SessionStatus {
         SessionStatus::from_idle(self.idle_for())
     }
+
+    /// Scroll the view `rows` back from live output (0 = live).
+    pub fn set_scrollback(&self, rows: usize) {
+        self.parser.lock().unwrap().screen_mut().set_scrollback(rows);
+    }
 }

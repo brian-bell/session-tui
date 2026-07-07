@@ -107,3 +107,16 @@ fn kill_terminates_a_running_child() {
         "child still running after kill"
     );
 }
+
+#[test]
+fn spawn_honors_the_requested_working_directory() {
+    let session = PtySession::spawn(&sh("pwd"), 24, 80).unwrap();
+    assert!(
+        wait_for(|| {
+            let t = session.screen_text();
+            t.contains("/tmp") || t.contains("/private/tmp")
+        }, Duration::from_secs(5)),
+        "pwd output: {:?}",
+        session.screen_text()
+    );
+}

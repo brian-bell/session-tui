@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn is_focus_toggle(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('\\')
+    // Ctrl+\ arrives as Char('\\') under the kitty protocol but as
+    // Char('4') from legacy terminals (crossterm maps byte 0x1C that way).
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
 
 /// Translate a crossterm key event into the bytes a terminal would send.
@@ -159,6 +162,18 @@ impl App {
         }
     }
 
+    /// Forward pasted text to the attached terminal as a bracketed paste.
+    pub fn handle_paste(&mut self, text: &str) -> Vec<Effect> {
+        let (Focus::Terminal, Some(run_id)) = (self.focus, self.attached) else {
+            return Vec::new();
+        };
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        self.scroll_offset = 0;
+        vec![Effect::WriteTerminal { run_id, bytes }]
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         if self.overlay != Overlay::None {
             return self.handle_overlay_key(key);
@@ -239,6 +254,11 @@ impl App {
                 let (agent, Some(cwd)) = (picker.agent, picker.chosen_dir()) else {
                     return Vec::new();
                 };
+                // Session history often points at deleted temp/worktree
+                // dirs; spawning there would silently fall back to $HOME.
+                if !std::path::Path::new(&cwd).is_dir() {
+                    return Vec::new();
+                }
                 self.overlay = Overlay::None;
                 self.launch_new(agent, &cwd)
             }

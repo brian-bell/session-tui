@@ -6,7 +6,8 @@ fn meta(id: &str, title: &str) -> SessionMeta {
     SessionMeta {
         id: id.into(),
         agent: Agent::Claude,
-        cwd: "/Users/brian/dev/myproj".into(),
+        // A real directory: picker launches refuse missing cwds.
+        cwd: "/tmp".into(),
         title: title.into(),
         timestamp: chrono::Utc::now(),
     }
@@ -63,6 +64,12 @@ fn ctrl_backslash_toggles_focus_and_terminal_mode_passes_keys_through() {
     // Ctrl+\ toggles back into the attached terminal
     app.handle_key(ctrl('\\'));
     assert_eq!(app.focus, Focus::Terminal);
+
+    // Legacy terminals deliver Ctrl+\ (byte 0x1C) as Ctrl+4; it must
+    // toggle too, and must NOT leak through to the PTY as a key.
+    let effects = app.handle_key(ctrl('4'));
+    assert!(effects.is_empty());
+    assert_eq!(app.focus, Focus::List);
 }
 
 #[test]
@@ -109,12 +116,15 @@ fn ctrl_k_kills_the_selected_running_session_after_confirmation() {
 
 #[test]
 fn launch_picker_starts_a_fresh_agent_in_a_known_project_dir() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
     let mut a = meta("s1", "one");
-    a.cwd = "/dev/proj-a".into();
+    a.cwd = dir_a.path().to_str().unwrap().into();
     let mut b = meta("s2", "two");
-    b.cwd = "/dev/proj-b".into();
+    b.cwd = dir_b.path().to_str().unwrap().into();
     let mut a2 = meta("s3", "three");
-    a2.cwd = "/dev/proj-a".into(); // duplicate cwd, should be deduped
+    a2.cwd = a.cwd.clone(); // duplicate cwd, should be deduped
+    let expected_b = b.cwd.clone();
     let mut app = App::new(vec![a, b, a2]);
 
     app.handle_key(key(KeyCode::Char('n')));
@@ -129,29 +139,49 @@ fn launch_picker_starts_a_fresh_agent_in_a_known_project_dir() {
     match &effects[..] {
         [Effect::Spawn { spec, .. }] => {
             assert_eq!(spec.program, "codex");
-            assert_eq!(spec.cwd, "/dev/proj-b");
+            assert_eq!(spec.cwd, expected_b);
         }
         other => panic!("expected Spawn, got {other:?}"),
     }
     assert_eq!(app.overlay, Overlay::None);
     assert_eq!(app.focus, Focus::Terminal);
     // A provisional entry for the new session tops the list.
-    assert_eq!(app.sessions[0].cwd, "/dev/proj-b");
+    assert_eq!(app.sessions[0].cwd, expected_b);
     assert_eq!(app.selected, 0);
 }
 
 #[test]
 fn launch_picker_accepts_a_typed_path_that_matches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap();
     let mut app = App::new(vec![meta("s1", "one")]);
     app.handle_key(key(KeyCode::Char('n')));
-    for c in "/tmp/brand-new".chars() {
+    for c in path.chars() {
         app.handle_key(key(KeyCode::Char(c)));
     }
     let effects = app.handle_key(key(KeyCode::Enter));
     match &effects[..] {
-        [Effect::Spawn { spec, .. }] => assert_eq!(spec.cwd, "/tmp/brand-new"),
+        [Effect::Spawn { spec, .. }] => assert_eq!(spec.cwd, path),
         other => panic!("expected Spawn, got {other:?}"),
     }
+}
+
+#[test]
+fn launch_picker_refuses_a_directory_that_does_not_exist() {
+    // A session whose cwd has since been deleted (temp dirs are common
+    // in history) must not silently launch the agent in $HOME.
+    let mut gone = meta("s1", "one");
+    gone.cwd = "/tmp/definitely-gone-e2e-dir".into();
+    let mut app = App::new(vec![gone]);
+
+    app.handle_key(key(KeyCode::Char('n')));
+    let effects = app.handle_key(key(KeyCode::Enter));
+
+    assert!(effects.is_empty(), "must not spawn into a missing dir");
+    assert!(
+        matches!(app.overlay, Overlay::LaunchPicker(_)),
+        "picker stays open so the user can pick something else"
+    );
 }
 
 #[test]
@@ -209,6 +239,26 @@ fn a_session_whose_child_exits_detaches_and_stops_showing_as_running() {
     assert!(!app.is_running(run_id));
     assert_eq!(app.attached_run(), None);
     assert_eq!(app.focus, Focus::List);
+}
+
+#[test]
+fn paste_reaches_the_terminal_as_a_bracketed_paste() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+    app.handle_key(key(KeyCode::Enter));
+    let run_id = app.attached_run().unwrap();
+
+    let effects = app.handle_paste("hello\nworld");
+    assert_eq!(
+        effects,
+        vec![Effect::WriteTerminal {
+            run_id,
+            bytes: b"\x1b[200~hello\nworld\x1b[201~".to_vec()
+        }]
+    );
+
+    // Pasting while the list is focused does nothing.
+    app.handle_key(ctrl('\\'));
+    assert!(app.handle_paste("x").is_empty());
 }
 
 #[test]
