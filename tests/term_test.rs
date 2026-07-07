@@ -60,7 +60,7 @@ fn launch_command_starts_a_fresh_agent_in_a_chosen_cwd() {
 
 #[test]
 fn spawned_command_output_appears_on_the_emulated_screen() {
-    let mut session = PtySession::spawn(&sh("printf 'hello-pty\\n'"), 24, 80).unwrap();
+    let session = PtySession::spawn(&sh("printf 'hello-pty\\n'"), 24, 80).unwrap();
 
     assert!(
         wait_for(|| session.screen_text().contains("hello-pty"), Duration::from_secs(5)),

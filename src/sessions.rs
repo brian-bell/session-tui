@@ -41,7 +41,7 @@ impl Default for ScanRoots {
 pub fn scan_all_sessions(roots: &ScanRoots) -> Result<Vec<SessionMeta>> {
     let mut sessions = scan_claude_sessions(&roots.claude)?;
     sessions.extend(scan_codex_sessions(&roots.codex)?);
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     Ok(sessions)
 }
 
@@ -85,11 +85,10 @@ fn scan_codex_dir(dir: &Path, sessions: &mut Vec<SessionMeta>) {
         let path = entry.path();
         if path.is_dir() {
             scan_codex_dir(&path, sessions);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-            if let Some(meta) = parse_codex_rollout(&path) {
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            && let Some(meta) = parse_codex_rollout(&path) {
                 sessions.push(meta);
             }
-        }
     }
 }
 
