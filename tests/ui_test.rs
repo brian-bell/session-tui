@@ -65,7 +65,9 @@ fn transcript_derived_strings_render_without_control_characters() {
     // render boundary rather than relying on ratatui's filtering).
     let mut evil = meta("s1", Agent::Claude, "title");
     evil.cwd = "/tmp/\x1b]0;pwned\x07dir".into();
-    let app = App::new(vec![evil]);
+    let mut app = App::new(vec![evil]);
+    // Notices embed transcript-derived cwds too.
+    app.notice = Some("directory no longer exists: /tmp/\x1b]0;pwned\x07dir".into());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
         .draw(|f| ui::render(f, &app, None, &Default::default()))

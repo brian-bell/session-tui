@@ -141,12 +141,15 @@ fn render_terminal(f: &mut Frame, app: &App, screen: Option<&vt100::Screen>, are
 
 fn render_help(f: &mut Frame, app: &App, area: Rect) {
     let (text, style) = match &app.notice {
-        Some(notice) => (notice.as_str(), Style::default().fg(Color::Yellow)),
+        // Notices can embed transcript-derived cwds; sanitize like
+        // every other render of untrusted strings.
+        Some(notice) => (sanitize(notice), Style::default().fg(Color::Yellow)),
         None => (
             match app.focus {
                 Focus::List => "Enter resume · n new · Ctrl+K kill · j/k move · q quit",
                 Focus::Terminal => "Ctrl+\\ back to list · PgUp/PgDn scrollback",
-            },
+            }
+            .to_string(),
             Style::default().fg(Color::DarkGray),
         ),
     };
