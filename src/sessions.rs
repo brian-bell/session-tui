@@ -174,8 +174,10 @@ fn parse_claude_transcript(path: &Path) -> Option<SessionMeta> {
         // wrapped in <command-...>/<local-command-...> tags; a session's
         // title should be the first thing the human actually did. For a
         // slash command that is the command itself — later messages are
-        // often skill-injected text, not the human.
-        if title.starts_with('<') {
+        // often skill-injected text, not the human. Only the known
+        // wrapper tags are synthetic: humans legitimately start prompts
+        // with XML/HTML fragments.
+        if title.starts_with("<command-") || title.starts_with("<local-command-") {
             if let Some(name) = command_name(&value["message"]["content"]) {
                 return Some(SessionMeta {
                     id,

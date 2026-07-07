@@ -59,6 +59,31 @@ fn renders_session_list_left_and_terminal_placeholder_right() {
 }
 
 #[test]
+fn transcript_derived_strings_render_without_control_characters() {
+    // cwd comes straight from JSONL and may contain hostile bytes; no
+    // control character may reach a rendered cell (we sanitize at the
+    // render boundary rather than relying on ratatui's filtering).
+    let mut evil = meta("s1", Agent::Claude, "title");
+    evil.cwd = "/tmp/\x1b]0;pwned\x07dir".into();
+    let app = App::new(vec![evil]);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|f| ui::render(f, &app, None, &Default::default()))
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            assert!(
+                !buffer[(x, y)].symbol().chars().any(|c| c.is_control()),
+                "control char in cell ({x},{y})"
+            );
+        }
+    }
+}
+
+#[test]
 fn picker_renders_without_panicking_on_a_tiny_terminal() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = App::new(vec![meta("s1", Agent::Claude, "one")]);

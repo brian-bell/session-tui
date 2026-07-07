@@ -117,6 +117,27 @@ fn title_skips_synthetic_command_messages() {
 }
 
 #[test]
+fn human_prompts_starting_with_angle_brackets_still_title_the_session() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("ffff1111-2222-3333-4444-555566667777.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<div> in the header is broken"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"a later message"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions[0].title, "<div> in the header is broken");
+}
+
+#[test]
 fn slash_command_sessions_are_titled_by_their_command() {
     // A session started by a slash command records the human's action
     // as a <command-message>/<command-name> wrapper, and skills then

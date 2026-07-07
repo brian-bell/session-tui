@@ -80,15 +80,21 @@ fn session_line<'a>(
         Some(_) => "▶", // running, idle (or status not sampled yet)
         None => " ",
     };
-    let project = m.cwd.rsplit('/').next().unwrap_or("");
+    let project = sanitize(m.cwd.rsplit('/').next().unwrap_or(""));
     Line::from(vec![
         Span::styled(format!("{marker}{icon} "), Style::default().fg(icon_color)),
-        Span::raw(m.title.clone()),
+        Span::raw(sanitize(&m.title)),
         Span::styled(
             format!("  {} · {}", project, relative_time(m)),
             Style::default().fg(Color::DarkGray),
         ),
     ])
+}
+
+/// Transcript-derived strings (titles, cwds) are untrusted; never let
+/// control bytes anywhere near the render path.
+fn sanitize(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 fn relative_time(m: &SessionMeta) -> String {
@@ -200,7 +206,7 @@ fn render_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
         } else {
             Style::default()
         };
-        lines.push(Line::styled(format!("  {dir}"), style));
+        lines.push(Line::styled(format!("  {}", sanitize(dir)), style));
     }
     f.render_widget(
         Paragraph::new(lines).block(
