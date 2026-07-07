@@ -37,6 +37,21 @@ impl Default for ScanRoots {
     }
 }
 
+/// Create missing store roots so they can be watched. Transcripts hold
+/// prompts and pasted secrets: anything we create must be private
+/// (0700), matching what the agent CLIs themselves do.
+pub fn ensure_store_roots(roots: &ScanRoots) {
+    for root in [&roots.claude, &roots.codex] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = fs::DirBuilder::new().recursive(true).mode(0o700).create(root);
+        }
+        #[cfg(not(unix))]
+        let _ = fs::create_dir_all(root);
+    }
+}
+
 /// Scan both agents' stores and return one list sorted newest-first.
 pub fn scan_all_sessions(roots: &ScanRoots) -> Result<Vec<SessionMeta>> {
     let mut sessions = scan_claude_sessions(&roots.claude)?;

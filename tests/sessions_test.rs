@@ -143,6 +143,29 @@ fn slash_command_sessions_are_titled_by_their_command() {
 }
 
 #[test]
+fn store_roots_are_created_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = session_tui::sessions::ScanRoots {
+        claude: tmp.path().join("claude/projects"),
+        codex: tmp.path().join("codex/sessions"),
+    };
+
+    session_tui::sessions::ensure_store_roots(&roots);
+
+    for dir in [&roots.claude, &roots.codex] {
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{dir:?} must not be world-accessible");
+        let parent_mode = std::fs::metadata(dir.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(parent_mode, 0o700, "created parents must be private too");
+    }
+}
+
+#[test]
 fn codex_scan_survives_symlink_cycles() {
     let root = tempfile::tempdir().unwrap();
     write_codex_session(

@@ -275,6 +275,13 @@ impl App {
     /// by the emulator); without it the delimiters would be literal
     /// garbage in the child's input.
     pub fn handle_paste(&mut self, text: &str, bracketed: bool) -> Vec<Effect> {
+        // A paste while the launch picker is open is a project path.
+        if let Overlay::LaunchPicker(ref mut picker) = self.overlay {
+            picker.input.extend(text.chars().filter(|c| !c.is_control()));
+            picker.highlighted = 0;
+            picker.navigated = false;
+            return Vec::new();
+        }
         let (Focus::Terminal, Some(run_id)) = (self.focus, self.attached) else {
             return Vec::new();
         };

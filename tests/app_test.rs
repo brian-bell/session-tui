@@ -549,6 +549,21 @@ fn paste_is_bracketed_only_when_the_child_enabled_bracketed_paste() {
 }
 
 #[test]
+fn pasting_into_the_launch_picker_fills_the_path_field() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+    app.handle_key(key(KeyCode::Char('n')));
+
+    let effects = app.handle_paste("/tmp/some\nproject", false);
+
+    assert!(effects.is_empty());
+    let Overlay::LaunchPicker(picker) = &app.overlay else {
+        panic!("picker should still be open");
+    };
+    // Control chars (including the newline) must not survive.
+    assert_eq!(picker.input, "/tmp/someproject");
+}
+
+#[test]
 fn switching_sessions_always_lands_on_live_output_not_old_scrollback() {
     let mut app = App::new(vec![meta("s1", "one"), meta("s2", "two")]);
     app.handle_key(key(KeyCode::Enter)); // resume s1
