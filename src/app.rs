@@ -238,11 +238,18 @@ impl App {
             .collect();
         self.running.retain(|_, &mut r| r != run_id);
         // A provisional row has no transcript to resume; once its
-        // process is gone the row is meaningless.
+        // process is gone the row is meaningless. Selection follows
+        // the selected session's identity, not its old index.
+        let selected_id = self.sessions.get(self.selected).map(|m| m.id.clone());
         self.sessions
             .retain(|m| !(m.id.starts_with("live-") && session_ids.contains(&m.id)));
         for id in &session_ids {
             self.launch_snapshots.remove(id);
+        }
+        if let Some(id) = selected_id
+            && let Some(pos) = self.sessions.iter().position(|m| m.id == id)
+        {
+            self.selected = pos;
         }
         self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
         if self.attached == Some(run_id) {

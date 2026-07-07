@@ -91,6 +91,12 @@ impl PtySession {
             })
             .context("openpty")?;
 
+        // Acquire the PTY endpoints before spawning: if reader/writer
+        // setup fails (e.g. fd exhaustion) there must not be an
+        // already-running child left behind untracked.
+        let mut reader = pair.master.try_clone_reader().context("clone pty reader")?;
+        let writer = pair.master.take_writer().context("take pty writer")?;
+
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
@@ -99,9 +105,6 @@ impl PtySession {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK_LINES)));
         let last_output = Arc::new(Mutex::new(Instant::now()));
-
-        let mut reader = pair.master.try_clone_reader().context("clone pty reader")?;
-        let writer = pair.master.take_writer().context("take pty writer")?;
         {
             let parser = Arc::clone(&parser);
             let last_output = Arc::clone(&last_output);

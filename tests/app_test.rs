@@ -486,6 +486,28 @@ fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
 }
 
 #[test]
+fn selection_follows_the_session_when_a_live_row_above_it_exits() {
+    let mut app = App::new(vec![meta("s1", "one"), meta("s2", "two")]);
+    // Launch a provisional row (lands on top as index 0).
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Enter));
+    let run_id = app.attached_run().unwrap();
+    app.handle_key(ctrl('\\'));
+
+    // Select s2 (index 2, below the provisional row).
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.sessions[app.selected].id, "s2");
+
+    // The provisional process exits; its row above is removed.
+    app.mark_exited(run_id);
+    assert_eq!(
+        app.sessions[app.selected].id, "s2",
+        "selection must track the session, not the index"
+    );
+}
+
+#[test]
 fn a_session_whose_child_exits_detaches_and_stops_showing_as_running() {
     let mut app = App::new(vec![meta("s1", "one")]);
     app.handle_key(key(KeyCode::Enter));
