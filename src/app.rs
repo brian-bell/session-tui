@@ -133,6 +133,10 @@ pub struct App {
     pub notice: Option<String>,
     /// session id -> live run
     running: HashMap<String, RunId>,
+    /// live-id -> transcript ids that already existed at launch time;
+    /// only a transcript outside this set may be adopted as the
+    /// provisional session's real identity.
+    launch_snapshots: HashMap<String, std::collections::HashSet<String>>,
     attached: Option<RunId>,
     next_run_id: RunId,
 }
@@ -147,6 +151,7 @@ impl App {
             scroll_offset: 0,
             notice: None,
             running: HashMap::new(),
+            launch_snapshots: HashMap::new(),
             attached: None,
             next_run_id: 1,
         }
@@ -189,6 +194,9 @@ impl App {
         // process is gone the row is meaningless.
         self.sessions
             .retain(|m| !(m.id.starts_with("live-") && session_ids.contains(&m.id)));
+        for id in &session_ids {
+            self.launch_snapshots.remove(id);
+        }
         self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
         if self.attached == Some(run_id) {
             self.attached = None;
@@ -237,7 +245,9 @@ impl App {
         if let Overlay::LaunchPicker(_) = self.overlay {
             return self.handle_picker_key(key);
         }
-        let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Enter);
+        // The prompts read "y/N": only an explicit y confirms; Enter
+        // takes the safe default and cancels.
+        let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
         let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         match overlay {
             Overlay::ConfirmQuit if confirmed => vec![Effect::Quit],
@@ -281,11 +291,15 @@ impl App {
             KeyCode::Char(c) => {
                 picker.input.push(c);
                 picker.highlighted = 0;
+                // The old navigation pointed into a now-stale filtered
+                // list; the freshly typed path speaks for itself.
+                picker.navigated = false;
                 Vec::new()
             }
             KeyCode::Backspace => {
                 picker.input.pop();
                 picker.highlighted = 0;
+                picker.navigated = false;
                 Vec::new()
             }
             KeyCode::Enter => {
@@ -316,6 +330,12 @@ impl App {
     fn launch_new(&mut self, agent: Agent, cwd: &str) -> Vec<Effect> {
         let run_id = self.next_run_id;
         self.next_run_id += 1;
+        // Transcripts already on disk belong to other sessions; only a
+        // transcript first seen after this launch may be adopted.
+        self.launch_snapshots.insert(
+            format!("live-{run_id}"),
+            self.sessions.iter().map(|m| m.id.clone()).collect(),
+        );
         let meta = SessionMeta {
             id: format!("live-{run_id}"),
             agent,
@@ -361,11 +381,13 @@ impl App {
         // real identity. Move the live PTY over and drop the
         // placeholder so the session shows exactly once.
         live.retain(|placeholder| {
+            let known_at_launch = self.launch_snapshots.get(&placeholder.id);
             let real_id = scanned.iter().find_map(|s| {
                 (s.agent == placeholder.agent
                     && s.cwd == placeholder.cwd
                     && s.timestamp >= placeholder.timestamp
-                    && !self.running.contains_key(&s.id))
+                    && !self.running.contains_key(&s.id)
+                    && known_at_launch.is_none_or(|known| !known.contains(&s.id)))
                 .then(|| s.id.clone())
             });
             let Some(real_id) = real_id else {
@@ -374,6 +396,7 @@ impl App {
             if let Some(run_id) = self.running.remove(&placeholder.id) {
                 self.running.insert(real_id.clone(), run_id);
             }
+            self.launch_snapshots.remove(&placeholder.id);
             if selected_id.as_deref() == Some(placeholder.id.as_str()) {
                 selected_id = Some(real_id);
             }

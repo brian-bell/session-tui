@@ -88,6 +88,12 @@ fn quit_is_immediate_when_idle_but_confirmed_when_sessions_are_running() {
     assert!(app.handle_key(key(KeyCode::Esc)).is_empty());
     assert_eq!(app.overlay, Overlay::None);
 
+    // The prompt says y/N: Enter must take the safe default and cancel.
+    app.handle_key(key(KeyCode::Char('q')));
+    assert!(app.handle_key(key(KeyCode::Enter)).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(app.has_running_sessions(), "Enter must not confirm a kill");
+
     app.handle_key(key(KeyCode::Char('q')));
     assert_eq!(app.handle_key(key(KeyCode::Char('y'))), vec![Effect::Quit]);
 }
@@ -224,7 +230,7 @@ fn typed_existing_path_beats_a_substring_match_unless_user_navigated() {
     }
 
     // But explicitly navigating to a filtered match picks the match.
-    let mut app = App::new(vec![known]);
+    let mut app = App::new(vec![known.clone()]);
     app.handle_key(key(KeyCode::Char('n')));
     type_path(&mut app, parent.path().to_str().unwrap());
     app.handle_key(key(KeyCode::Down));
@@ -233,6 +239,20 @@ fn typed_existing_path_beats_a_substring_match_unless_user_navigated() {
     match &effects[..] {
         [Effect::Spawn { spec, .. }] => {
             assert_eq!(spec.cwd, canonical_sub.to_str().unwrap());
+        }
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+
+    // Editing the input after navigating invalidates the navigation:
+    // the freshly typed existing path wins again.
+    let mut app = App::new(vec![known]);
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Down)); // navigate first...
+    type_path(&mut app, parent.path().to_str().unwrap()); // ...then type
+    let effects = app.handle_key(key(KeyCode::Enter));
+    match &effects[..] {
+        [Effect::Spawn { spec, .. }] => {
+            assert_eq!(spec.cwd, canonical_parent.to_str().unwrap());
         }
         other => panic!("expected Spawn, got {other:?}"),
     }
@@ -339,6 +359,41 @@ fn provisional_entry_disappears_when_its_process_exits() {
     // And a rescan must not resurrect anything either.
     app.update_sessions(vec![meta("s1", "one")]);
     assert!(!app.sessions.iter().any(|m| m.id.starts_with("live-")));
+}
+
+#[test]
+fn adoption_ignores_transcripts_that_existed_before_the_launch() {
+    // Another session in the same cwd, active outside this TUI, gets
+    // its mtime bumped after our launch. It must not steal the
+    // provisional row: only a transcript we had never seen qualifies.
+    let canonical_tmp = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut outside = meta("outside-id", "unrelated session");
+    outside.cwd = canonical_tmp.clone();
+
+    let mut app = App::new(vec![outside.clone()]);
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Enter)); // launch in /tmp
+    let run_id = app.attached_run().unwrap();
+
+    // Rescan: the pre-existing transcript now has a newer mtime.
+    outside.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
+    app.update_sessions(vec![outside.clone()]);
+    assert_eq!(
+        app.run_id_for("outside-id"),
+        None,
+        "a transcript known before launch must not be adopted"
+    );
+    assert!(app.sessions.iter().any(|m| m.id.starts_with("live-")));
+
+    // A genuinely new transcript still adopts.
+    let mut fresh = meta("fresh-id", "the launched session");
+    fresh.cwd = canonical_tmp;
+    fresh.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
+    app.update_sessions(vec![fresh, outside]);
+    assert_eq!(app.run_id_for("fresh-id"), Some(run_id));
 }
 
 #[test]
