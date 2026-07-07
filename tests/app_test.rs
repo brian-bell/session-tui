@@ -21,6 +21,10 @@ fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
+fn alt(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+}
+
 #[test]
 fn enter_on_a_historical_session_resumes_it_and_focuses_the_terminal() {
     let mut app = App::new(vec![meta("s1", "one"), meta("s2", "two")]);
@@ -397,6 +401,53 @@ fn adoption_ignores_transcripts_that_existed_before_the_launch() {
 }
 
 #[test]
+fn adoption_holds_off_while_the_match_is_ambiguous() {
+    let canonical_tmp = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // Two provisional launches in the same agent+cwd: a single new
+    // transcript cannot be attributed to either process.
+    let mut app = App::new(vec![meta("s1", "one")]);
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(ctrl('\\'));
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(ctrl('\\'));
+
+    let mut fresh = meta("fresh-id", "someone's session");
+    fresh.cwd = canonical_tmp.clone();
+    fresh.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
+    app.update_sessions(vec![fresh, meta("s1", "one")]);
+
+    assert_eq!(app.run_id_for("fresh-id"), None, "ambiguous: two placeholders");
+    assert_eq!(
+        app.sessions.iter().filter(|m| m.id.starts_with("live-")).count(),
+        2,
+        "both placeholders must survive until the match is unambiguous"
+    );
+
+    // One placeholder but two candidate transcripts: also ambiguous.
+    let mut app = App::new(vec![meta("s1", "one")]);
+    app.handle_key(key(KeyCode::Char('n')));
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(ctrl('\\'));
+    let mut c1 = meta("cand-1", "a");
+    c1.cwd = canonical_tmp.clone();
+    c1.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let mut c2 = meta("cand-2", "b");
+    c2.cwd = canonical_tmp;
+    c2.timestamp = chrono::Utc::now() + chrono::Duration::seconds(2);
+    app.update_sessions(vec![c2, c1, meta("s1", "one")]);
+
+    assert_eq!(app.run_id_for("cand-1"), None);
+    assert_eq!(app.run_id_for("cand-2"), None);
+    assert_eq!(app.sessions.iter().filter(|m| m.id.starts_with("live-")).count(), 1);
+}
+
+#[test]
 fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
     let mut app = App::new(vec![meta("s1", "one")]);
     app.handle_key(key(KeyCode::Char('n')));
@@ -513,6 +564,12 @@ fn terminal_mode_encodes_special_keys_as_ansi_sequences() {
         (key(KeyCode::Left), b"\x1b[D"),
         (ctrl('c'), b"\x03"),
         (ctrl('d'), b"\x04"),
+        // Meta/Alt: ESC-prefixed for chars (readline Alt+f/Alt+b),
+        // CSI 1;3 modifiers for arrows.
+        (alt('f'), b"\x1bf"),
+        (alt('b'), b"\x1bb"),
+        (KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), b"\x1b[1;3A"),
+        (KeyEvent::new(KeyCode::Down, KeyModifiers::ALT), b"\x1b[1;3B"),
     ];
     for (k, want) in cases {
         let effects = app.handle_key(k);

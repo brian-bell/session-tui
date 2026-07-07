@@ -12,6 +12,21 @@ fn is_focus_toggle(key: &KeyEvent) -> bool {
 /// Translate a crossterm key event into the bytes a terminal would send.
 fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        // Meta convention: ESC-prefix the unmodified encoding for
+        // chars (readline Alt+f/Alt+b); CSI 1;3 modifier for arrows.
+        let stripped = KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
+        return match key.code {
+            KeyCode::Up => Some(b"\x1b[1;3A".to_vec()),
+            KeyCode::Down => Some(b"\x1b[1;3B".to_vec()),
+            KeyCode::Right => Some(b"\x1b[1;3C".to_vec()),
+            KeyCode::Left => Some(b"\x1b[1;3D".to_vec()),
+            _ => encode_key(&stripped).map(|mut bytes| {
+                bytes.insert(0, 0x1b);
+                bytes
+            }),
+        };
+    }
     Some(match key.code {
         KeyCode::Char(c) if ctrl => {
             // Ctrl+A..Ctrl+Z and friends map to 0x01..0x1a
@@ -385,22 +400,35 @@ impl App {
             .collect();
 
         // Adopt: a scanned transcript by the same agent, in the same
-        // cwd, written after the launch is this provisional session's
-        // real identity. Move the live PTY over and drop the
-        // placeholder so the session shows exactly once.
+        // cwd, first seen after the launch is this provisional
+        // session's real identity. Move the live PTY over and drop the
+        // placeholder so the session shows exactly once. Adoption must
+        // be unambiguous — with two same-cwd placeholders or two new
+        // transcripts, mtimes can't say which process wrote which file,
+        // and guessing would bind kill/attach to the wrong terminal.
+        let mut siblings: HashMap<(Agent, String), usize> = HashMap::new();
+        for p in &live {
+            *siblings.entry((p.agent, p.cwd.clone())).or_default() += 1;
+        }
         live.retain(|placeholder| {
+            if siblings[&(placeholder.agent, placeholder.cwd.clone())] > 1 {
+                return true;
+            }
             let known_at_launch = self.launch_snapshots.get(&placeholder.id);
-            let real_id = scanned.iter().find_map(|s| {
-                (s.agent == placeholder.agent
-                    && s.cwd == placeholder.cwd
-                    && s.timestamp >= placeholder.timestamp
-                    && !self.running.contains_key(&s.id)
-                    && known_at_launch.is_none_or(|known| !known.contains(&s.id)))
-                .then(|| s.id.clone())
-            });
-            let Some(real_id) = real_id else {
+            let candidates: Vec<&SessionMeta> = scanned
+                .iter()
+                .filter(|s| {
+                    s.agent == placeholder.agent
+                        && s.cwd == placeholder.cwd
+                        && s.timestamp >= placeholder.timestamp
+                        && !self.running.contains_key(&s.id)
+                        && known_at_launch.is_none_or(|known| !known.contains(&s.id))
+                })
+                .collect();
+            let [candidate] = candidates[..] else {
                 return true;
             };
+            let real_id = candidate.id.clone();
             if let Some(run_id) = self.running.remove(&placeholder.id) {
                 self.running.insert(real_id.clone(), run_id);
             }
