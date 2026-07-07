@@ -180,7 +180,13 @@ impl PtySession {
 /// transcript on disk keeps the session resumable.
 impl Drop for PtySession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // Signal only a child that is still running: portable-pty's
+        // unix kill() SIGHUPs the stored pid unconditionally, and after
+        // a previous kill()/try_wait() has reaped the child that pid
+        // may already belong to an unrelated process.
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
