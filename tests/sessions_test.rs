@@ -119,6 +119,26 @@ fn title_skips_synthetic_command_messages() {
 }
 
 #[test]
+fn codex_scan_survives_symlink_cycles() {
+    let root = tempfile::tempdir().unwrap();
+    write_codex_session(
+        root.path(),
+        "2026/06/25",
+        "019f01b4-47cd-76c0-9d83-9aa151a3a918",
+        "/Users/brian/dev/myproj",
+        "user",
+        "real session",
+    );
+    // A symlink pointing back at an ancestor must not hang the walk.
+    std::os::unix::fs::symlink(root.path(), root.path().join("2026/loop")).unwrap();
+
+    let sessions = scan_codex_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "real session");
+}
+
+#[test]
 fn titles_never_carry_control_characters() {
     // Transcript content is untrusted; a prompt full of ANSI/OSC bytes
     // must not survive into the (display-only) title.

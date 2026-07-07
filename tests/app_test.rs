@@ -570,6 +570,13 @@ fn terminal_mode_encodes_special_keys_as_ansi_sequences() {
         (alt('b'), b"\x1bb"),
         (KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), b"\x1b[1;3A"),
         (KeyEvent::new(KeyCode::Down, KeyModifiers::ALT), b"\x1b[1;3B"),
+        // Function keys, Insert, and modified arrows must pass through.
+        (key(KeyCode::F(1)), b"\x1bOP"),
+        (key(KeyCode::F(5)), b"\x1b[15~"),
+        (key(KeyCode::F(12)), b"\x1b[24~"),
+        (key(KeyCode::Insert), b"\x1b[2~"),
+        (KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL), b"\x1b[1;5C"),
+        (KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT), b"\x1b[1;2D"),
     ];
     for (k, want) in cases {
         let effects = app.handle_key(k);

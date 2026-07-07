@@ -12,20 +12,36 @@ fn is_focus_toggle(key: &KeyEvent) -> bool {
 /// Translate a crossterm key event into the bytes a terminal would send.
 fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Modified arrows use the xterm CSI 1;<mod> scheme:
+    // 2=Shift, 3=Alt, 5=Ctrl (and their sums).
+    if let Some(arrow) = match key.code {
+        KeyCode::Up => Some(b'A'),
+        KeyCode::Down => Some(b'B'),
+        KeyCode::Right => Some(b'C'),
+        KeyCode::Left => Some(b'D'),
+        _ => None,
+    } {
+        let mut modifier = 1;
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            modifier += 1;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            modifier += 2;
+        }
+        if ctrl {
+            modifier += 4;
+        }
+        if modifier > 1 {
+            return Some(format!("\x1b[1;{}{}", modifier, arrow as char).into_bytes());
+        }
+    }
     if key.modifiers.contains(KeyModifiers::ALT) {
-        // Meta convention: ESC-prefix the unmodified encoding for
-        // chars (readline Alt+f/Alt+b); CSI 1;3 modifier for arrows.
+        // Meta convention: ESC-prefix the unmodified encoding.
         let stripped = KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
-        return match key.code {
-            KeyCode::Up => Some(b"\x1b[1;3A".to_vec()),
-            KeyCode::Down => Some(b"\x1b[1;3B".to_vec()),
-            KeyCode::Right => Some(b"\x1b[1;3C".to_vec()),
-            KeyCode::Left => Some(b"\x1b[1;3D".to_vec()),
-            _ => encode_key(&stripped).map(|mut bytes| {
-                bytes.insert(0, 0x1b);
-                bytes
-            }),
-        };
+        return encode_key(&stripped).map(|mut bytes| {
+            bytes.insert(0, 0x1b);
+            bytes
+        });
     }
     Some(match key.code {
         KeyCode::Char(c) if ctrl => {
@@ -50,6 +66,13 @@ fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Home => b"\x1b[H".to_vec(),
         KeyCode::End => b"\x1b[F".to_vec(),
         KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::F(n @ 1..=4) => vec![0x1b, b'O', b'P' + n - 1],
+        KeyCode::F(n @ 5..=12) => {
+            // xterm numbering skips 16 and 22.
+            let code = [15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5];
+            format!("\x1b[{code}~").into_bytes()
+        }
         _ => return None,
     })
 }

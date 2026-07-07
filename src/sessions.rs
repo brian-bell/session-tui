@@ -82,13 +82,20 @@ fn scan_codex_dir(dir: &Path, sessions: &mut Vec<SessionMeta>) {
         return;
     };
     for entry in entries.flatten() {
+        // DirEntry::file_type does not follow symlinks: a link back to
+        // an ancestor must not turn the walk into an infinite loop.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             scan_codex_dir(&path, sessions);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-            && let Some(meta) = parse_codex_rollout(&path) {
-                sessions.push(meta);
-            }
+        } else if file_type.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            && let Some(meta) = parse_codex_rollout(&path)
+        {
+            sessions.push(meta);
+        }
     }
 }
 
