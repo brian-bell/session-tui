@@ -166,6 +166,10 @@ fn spawn_scanner_thread(tx: mpsc::Sender<Event>) {
             return;
         };
         for root in [&roots.claude, &roots.codex] {
+            // A store that doesn't exist yet (fresh install, or one of
+            // the two CLIs never used) can't be watched; create it so
+            // sessions launched later still show up without a restart.
+            let _ = std::fs::create_dir_all(root);
             let _ = watcher.watch(root, RecursiveMode::Recursive);
         }
         // Debounce: after a burst of fs events, wait for 500ms of quiet.

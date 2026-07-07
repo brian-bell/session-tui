@@ -124,7 +124,10 @@ fn launch_picker_starts_a_fresh_agent_in_a_known_project_dir() {
     b.cwd = dir_b.path().to_str().unwrap().into();
     let mut a2 = meta("s3", "three");
     a2.cwd = a.cwd.clone(); // duplicate cwd, should be deduped
-    let expected_b = b.cwd.clone();
+    let expected_b = std::fs::canonicalize(dir_b.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut app = App::new(vec![a, b, a2]);
 
     app.handle_key(key(KeyCode::Char('n')));
@@ -154,6 +157,7 @@ fn launch_picker_starts_a_fresh_agent_in_a_known_project_dir() {
 fn launch_picker_accepts_a_typed_path_that_matches_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_str().unwrap();
+    let canonical = std::fs::canonicalize(dir.path()).unwrap();
     let mut app = App::new(vec![meta("s1", "one")]);
     app.handle_key(key(KeyCode::Char('n')));
     for c in path.chars() {
@@ -161,7 +165,75 @@ fn launch_picker_accepts_a_typed_path_that_matches_nothing() {
     }
     let effects = app.handle_key(key(KeyCode::Enter));
     match &effects[..] {
-        [Effect::Spawn { spec, .. }] => assert_eq!(spec.cwd, path),
+        [Effect::Spawn { spec, .. }] => assert_eq!(spec.cwd, canonical.to_str().unwrap()),
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+}
+
+#[test]
+fn launch_uses_the_canonical_path_so_adoption_can_match_transcripts() {
+    // Transcripts record the agent's resolved getcwd; a symlinked or
+    // dot-riddled picker path must be canonicalized or the provisional
+    // row never matches the scanned transcript.
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(dir.path()).unwrap();
+    let typed = format!("{}/.", dir.path().display());
+
+    let mut app = App::new(vec![meta("s1", "one")]);
+    app.handle_key(key(KeyCode::Char('n')));
+    for c in typed.chars() {
+        app.handle_key(key(KeyCode::Char(c)));
+    }
+    let effects = app.handle_key(key(KeyCode::Enter));
+
+    match &effects[..] {
+        [Effect::Spawn { spec, .. }] => {
+            assert_eq!(spec.cwd, canonical.to_str().unwrap());
+        }
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+    assert_eq!(app.sessions[0].cwd, canonical.to_str().unwrap());
+}
+
+#[test]
+fn typed_existing_path_beats_a_substring_match_unless_user_navigated() {
+    // Known dir /X/sub contains the typed text "/X"; the user typed an
+    // exact existing path and expects exactly it.
+    let parent = tempfile::tempdir().unwrap();
+    let sub = parent.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let mut known = meta("s1", "one");
+    known.cwd = sub.to_str().unwrap().into();
+
+    let type_path = |app: &mut App, path: &str| {
+        for c in path.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    };
+
+    let mut app = App::new(vec![known.clone()]);
+    app.handle_key(key(KeyCode::Char('n')));
+    type_path(&mut app, parent.path().to_str().unwrap());
+    let effects = app.handle_key(key(KeyCode::Enter));
+    let canonical_parent = std::fs::canonicalize(parent.path()).unwrap();
+    match &effects[..] {
+        [Effect::Spawn { spec, .. }] => {
+            assert_eq!(spec.cwd, canonical_parent.to_str().unwrap());
+        }
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+
+    // But explicitly navigating to a filtered match picks the match.
+    let mut app = App::new(vec![known]);
+    app.handle_key(key(KeyCode::Char('n')));
+    type_path(&mut app, parent.path().to_str().unwrap());
+    app.handle_key(key(KeyCode::Down));
+    let effects = app.handle_key(key(KeyCode::Enter));
+    let canonical_sub = std::fs::canonicalize(&sub).unwrap();
+    match &effects[..] {
+        [Effect::Spawn { spec, .. }] => {
+            assert_eq!(spec.cwd, canonical_sub.to_str().unwrap());
+        }
         other => panic!("expected Spawn, got {other:?}"),
     }
 }
@@ -277,8 +349,13 @@ fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
     let run_id = app.attached_run().unwrap();
 
     // The watcher discovers the transcript the new agent just created:
-    // same agent + cwd, written after the launch.
+    // same agent + cwd, written after the launch. Transcripts record
+    // the resolved getcwd, which is what the launch stored too.
     let mut real = meta("real-id", "the actual prompt");
+    real.cwd = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     real.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
     app.update_sessions(vec![real, meta("s1", "one")]);
 

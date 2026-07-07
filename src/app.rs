@@ -77,6 +77,9 @@ pub struct PickerState {
     pub dirs: Vec<String>,
     pub highlighted: usize,
     pub input: String,
+    /// True once the user moved the highlight; an explicit choice of a
+    /// filtered match then outranks the typed text.
+    navigated: bool,
 }
 
 impl PickerState {
@@ -86,6 +89,7 @@ impl PickerState {
             dirs,
             highlighted: 0,
             input: String::new(),
+            navigated: false,
         }
     }
 
@@ -98,8 +102,16 @@ impl PickerState {
             .collect()
     }
 
-    /// The cwd a launch would use right now.
+    /// The cwd a launch would use right now. A typed path that exists
+    /// wins over substring matches of known dirs — unless the user
+    /// explicitly navigated the match list.
     pub fn chosen_dir(&self) -> Option<String> {
+        if !self.navigated
+            && !self.input.is_empty()
+            && std::path::Path::new(&self.input).is_dir()
+        {
+            return Some(self.input.clone());
+        }
         let matches = self.matches();
         match matches.get(self.highlighted) {
             Some(d) => Some((*d).to_string()),
@@ -249,11 +261,13 @@ impl App {
                 let count = picker.matches().len();
                 if count > 0 {
                     picker.highlighted = (picker.highlighted + 1).min(count - 1);
+                    picker.navigated = true;
                 }
                 Vec::new()
             }
             KeyCode::Up => {
                 picker.highlighted = picker.highlighted.saturating_sub(1);
+                picker.navigated = true;
                 Vec::new()
             }
             KeyCode::Char(c) => {
@@ -272,10 +286,16 @@ impl App {
                 };
                 // Session history often points at deleted temp/worktree
                 // dirs; spawning there would silently fall back to $HOME.
-                if !std::path::Path::new(&cwd).is_dir() {
-                    self.notice = Some(format!("directory no longer exists: {cwd}"));
-                    return Vec::new();
-                }
+                // Canonicalize so the provisional row's cwd matches the
+                // resolved cwd the agent will record in its transcript
+                // (relative paths, `.` segments, /tmp symlinks).
+                let cwd = match std::fs::canonicalize(&cwd) {
+                    Ok(c) => c.to_string_lossy().into_owned(),
+                    Err(_) => {
+                        self.notice = Some(format!("directory no longer exists: {cwd}"));
+                        return Vec::new();
+                    }
+                };
                 self.overlay = Overlay::None;
                 self.launch_new(agent, &cwd)
             }
