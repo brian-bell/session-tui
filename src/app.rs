@@ -164,6 +164,14 @@ impl App {
         self.running.get(session_id).copied()
     }
 
+    /// Show `run_id` in the terminal pane, always starting at live
+    /// output rather than whatever scrollback the previous session had.
+    fn attach(&mut self, run_id: RunId) {
+        self.attached = Some(run_id);
+        self.focus = Focus::Terminal;
+        self.scroll_offset = 0;
+    }
+
     pub fn has_running_sessions(&self) -> bool {
         !self.running.is_empty()
     }
@@ -319,8 +327,7 @@ impl App {
         self.running.insert(meta.id.clone(), run_id);
         self.sessions.insert(0, meta);
         self.selected = 0;
-        self.attached = Some(run_id);
-        self.focus = Focus::Terminal;
+        self.attach(run_id);
         vec![Effect::Spawn { run_id, spec }]
     }
 
@@ -461,8 +468,7 @@ impl App {
             return Vec::new();
         };
         if let Some(&run_id) = self.running.get(&meta.id) {
-            self.attached = Some(run_id);
-            self.focus = Focus::Terminal;
+            self.attach(run_id);
             return Vec::new();
         }
         // Same trap as the launch picker: portable-pty falls back to
@@ -476,8 +482,7 @@ impl App {
         self.next_run_id += 1;
         let spec = CommandSpec::resume(meta);
         self.running.insert(meta.id.clone(), run_id);
-        self.attached = Some(run_id);
-        self.focus = Focus::Terminal;
+        self.attach(run_id);
         vec![Effect::Spawn { run_id, spec }]
     }
 }

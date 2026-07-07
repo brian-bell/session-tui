@@ -123,6 +123,29 @@ fn kill_terminates_and_reaps_the_child() {
 }
 
 #[test]
+fn dropping_a_session_kills_its_child() {
+    // If the TUI exits on an error path, PTY handles are dropped
+    // without an explicit Quit; agents must not keep acting detached.
+    let pid = {
+        let session = PtySession::spawn(&sh("sleep 100"), 24, 80).unwrap();
+        session.child_pid().expect("child should have a pid")
+    }; // dropped here
+
+    let gone = wait_for(
+        || {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            // killed and reaped: ps finds no such process at all
+            out.stdout.is_empty()
+        },
+        Duration::from_secs(5),
+    );
+    assert!(gone, "child survived PtySession drop");
+}
+
+#[test]
 fn spawn_honors_the_requested_working_directory() {
     let session = PtySession::spawn(&sh("pwd"), 24, 80).unwrap();
     assert!(

@@ -413,6 +413,27 @@ fn paste_reaches_the_terminal_as_a_bracketed_paste() {
 }
 
 #[test]
+fn switching_sessions_always_lands_on_live_output_not_old_scrollback() {
+    let mut app = App::new(vec![meta("s1", "one"), meta("s2", "two")]);
+    app.handle_key(key(KeyCode::Enter)); // resume s1
+    app.handle_key(key(KeyCode::PageUp));
+    assert!(app.scroll_offset > 0);
+
+    // Resuming another session must start at live output.
+    app.handle_key(ctrl('\\'));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Enter)); // resume s2 (fresh spawn)
+    assert_eq!(app.scroll_offset, 0, "fresh spawn must not inherit scrollback");
+
+    // Same when re-attaching an already-running session.
+    app.handle_key(key(KeyCode::PageUp));
+    app.handle_key(ctrl('\\'));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Enter)); // attach running s1
+    assert_eq!(app.scroll_offset, 0, "attach must not inherit scrollback");
+}
+
+#[test]
 fn terminal_mode_encodes_special_keys_as_ansi_sequences() {
     let mut app = App::new(vec![meta("s1", "one")]);
     app.handle_key(key(KeyCode::Enter));

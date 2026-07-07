@@ -170,7 +170,19 @@ impl PtySession {
     pub fn child_pid(&self) -> Option<u32> {
         self.child.process_id()
     }
+}
 
+/// Losing the handle must not orphan a running agent: error/panic exit
+/// paths drop sessions without going through an explicit Quit. The
+/// transcript on disk keeps the session resumable.
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl PtySession {
     /// How long since the child last produced output.
     pub fn idle_for(&self) -> Duration {
         self.last_output.lock().unwrap().elapsed()
