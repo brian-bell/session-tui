@@ -50,12 +50,23 @@ fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     }
     Some(match key.code {
         KeyCode::Char(c) if ctrl => {
-            // Ctrl+A..Ctrl+Z and friends map to 0x01..0x1a
             let c = c.to_ascii_lowercase();
             if c.is_ascii_lowercase() {
+                // Ctrl+A..Ctrl+Z map to 0x01..0x1a
                 vec![c as u8 - b'a' + 1]
             } else {
-                return None;
+                // Non-letter control bytes. Legacy terminals deliver
+                // 0x1d..0x1f as Ctrl+5..Ctrl+7 (0x1c/Ctrl+4 is the
+                // focus toggle and never reaches here).
+                match c {
+                    ' ' | '@' => vec![0x00],
+                    '[' => vec![0x1b],
+                    ']' | '5' => vec![0x1d],
+                    '^' | '6' => vec![0x1e],
+                    '_' | '7' | '/' => vec![0x1f],
+                    '?' => vec![0x7f],
+                    _ => return None,
+                }
             }
         }
         KeyCode::Char(c) => c.to_string().into_bytes(),

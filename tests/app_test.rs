@@ -592,6 +592,19 @@ fn terminal_mode_encodes_special_keys_as_ansi_sequences() {
         (alt('b'), b"\x1bb"),
         (KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), b"\x1b[1;3A"),
         (KeyEvent::new(KeyCode::Down, KeyModifiers::ALT), b"\x1b[1;3B"),
+        // Non-letter control keys: Ctrl+Space (NUL), Ctrl+] (GS),
+        // Ctrl+^ (RS), Ctrl+_ (US, readline undo), Ctrl+/ (US too).
+        // Legacy terminals deliver the 0x1d..0x1f bytes as Ctrl+5..7.
+        (ctrl(' '), b"\x00"),
+        (ctrl('@'), b"\x00"),
+        (ctrl('['), b"\x1b"),
+        (ctrl(']'), b"\x1d"),
+        (ctrl('5'), b"\x1d"),
+        (ctrl('^'), b"\x1e"),
+        (ctrl('6'), b"\x1e"),
+        (ctrl('_'), b"\x1f"),
+        (ctrl('7'), b"\x1f"),
+        (ctrl('/'), b"\x1f"),
         // Function keys, Insert, and modified arrows must pass through.
         (key(KeyCode::F(1)), b"\x1bOP"),
         (key(KeyCode::F(5)), b"\x1b[15~"),
