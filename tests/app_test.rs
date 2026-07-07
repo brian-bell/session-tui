@@ -586,4 +586,19 @@ fn terminal_mode_encodes_special_keys_as_ansi_sequences() {
             "for key {k:?}"
         );
     }
+
+    // With DECCKM (application cursor mode) set by the child,
+    // unmodified arrows switch to SS3 sequences.
+    app.app_cursor = true;
+    let effects = app.handle_key(key(KeyCode::Up));
+    assert_eq!(
+        effects,
+        vec![Effect::WriteTerminal { run_id, bytes: b"\x1bOA".to_vec() }]
+    );
+    // Modified arrows keep the CSI 1;<mod> form even in DECCKM.
+    let effects = app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    assert_eq!(
+        effects,
+        vec![Effect::WriteTerminal { run_id, bytes: b"\x1b[1;3A".to_vec() }]
+    );
 }

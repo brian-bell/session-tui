@@ -77,6 +77,7 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
 
         if let Some(pty) = app.attached_run().and_then(|id| ptys.get(&id)) {
             pty.set_scrollback(app.scroll_offset);
+            app.app_cursor = pty.application_cursor();
         }
         let statuses: HashMap<RunId, _> =
             ptys.iter().map(|(&id, p)| (id, p.status())).collect();

@@ -9,8 +9,10 @@ fn is_focus_toggle(key: &KeyEvent) -> bool {
         && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
 
-/// Translate a crossterm key event into the bytes a terminal would send.
-fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
+/// Translate a crossterm key event into the bytes a terminal would
+/// send. `app_cursor` is the child's DECCKM mode: unmodified arrows
+/// become SS3 (ESC O x) instead of CSI (ESC [ x).
+fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     // Modified arrows use the xterm CSI 1;<mod> scheme:
     // 2=Shift, 3=Alt, 5=Ctrl (and their sums).
@@ -34,11 +36,14 @@ fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
         if modifier > 1 {
             return Some(format!("\x1b[1;{}{}", modifier, arrow as char).into_bytes());
         }
+        if app_cursor {
+            return Some(vec![0x1b, b'O', arrow]);
+        }
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
         // Meta convention: ESC-prefix the unmodified encoding.
         let stripped = KeyEvent::new(key.code, key.modifiers - KeyModifiers::ALT);
-        return encode_key(&stripped).map(|mut bytes| {
+        return encode_key(&stripped, app_cursor).map(|mut bytes| {
             bytes.insert(0, 0x1b);
             bytes
         });
@@ -169,6 +174,9 @@ pub struct App {
     /// One-shot user-facing message (e.g. why an action was refused);
     /// cleared on the next keypress.
     pub notice: Option<String>,
+    /// Attached child's DECCKM (application cursor) mode, synced from
+    /// the emulator by the main loop; arrows encode as SS3 when set.
+    pub app_cursor: bool,
     /// session id -> live run
     running: HashMap<String, RunId>,
     /// live-id -> transcript ids that already existed at launch time;
@@ -188,6 +196,7 @@ impl App {
             overlay: Overlay::None,
             scroll_offset: 0,
             notice: None,
+            app_cursor: false,
             running: HashMap::new(),
             launch_snapshots: HashMap::new(),
             attached: None,
@@ -538,7 +547,7 @@ impl App {
             }
             _ => self.scroll_offset = 0,
         }
-        match encode_key(&key) {
+        match encode_key(&key, self.app_cursor) {
             Some(bytes) => vec![Effect::WriteTerminal { run_id, bytes }],
             None => Vec::new(),
         }

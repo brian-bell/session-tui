@@ -157,8 +157,19 @@ fn parse_claude_transcript(path: &Path) -> Option<SessionMeta> {
         };
         // Slash commands and shell output are recorded as user messages
         // wrapped in <command-...>/<local-command-...> tags; a session's
-        // title should be the first thing the human actually typed.
+        // title should be the first thing the human actually did. For a
+        // slash command that is the command itself — later messages are
+        // often skill-injected text, not the human.
         if title.starts_with('<') {
+            if let Some(name) = command_name(&value["message"]["content"]) {
+                return Some(SessionMeta {
+                    id,
+                    agent: Agent::Claude,
+                    cwd: cwd?,
+                    title: format!("/{name}"),
+                    timestamp,
+                });
+            }
             fallback_title.get_or_insert(title);
             continue;
         }
@@ -177,6 +188,23 @@ fn parse_claude_transcript(path: &Path) -> Option<SessionMeta> {
         title: fallback_title?,
         timestamp,
     })
+}
+
+/// The slash command name from a `<command-name>...</command-name>`
+/// wrapper, if this message is one.
+fn command_name(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(s) => s.as_str(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .find(|b| b["type"] == "text")
+            .and_then(|b| b["text"].as_str())?,
+        _ => return None,
+    };
+    let (_, rest) = text.split_once("<command-name>")?;
+    let (name, _) = rest.split_once("</command-name>")?;
+    let name = name.trim().trim_start_matches('/');
+    (!name.is_empty() && !name.contains('<')).then(|| first_line(name))
 }
 
 /// Claude message content is either a plain string or an array of blocks.

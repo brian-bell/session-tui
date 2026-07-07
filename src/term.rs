@@ -201,4 +201,9 @@ impl PtySession {
     pub fn bracketed_paste(&self) -> bool {
         self.parser.lock().unwrap().screen().bracketed_paste()
     }
+
+    /// Whether the child enabled application cursor mode (DECCKM).
+    pub fn application_cursor(&self) -> bool {
+        self.parser.lock().unwrap().screen().application_cursor()
+    }
 }

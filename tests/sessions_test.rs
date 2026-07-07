@@ -102,8 +102,6 @@ fn title_skips_synthetic_command_messages() {
     std::fs::write(
         dir.join("cccc1111-2222-3333-4444-555566667777.jsonl"),
         concat!(
-            r#"{"type":"user","message":{"role":"user","content":"<command-message>code-review</command-message>\n<command-name>code-review</command-name>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
-            "\n",
             r#"{"type":"user","message":{"role":"user","content":"<local-command-caveat>Caveat: generated output</local-command-caveat>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
             "\n",
             r#"{"type":"user","message":{"role":"user","content":"the actual human request"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:04.390Z"}"#,
@@ -116,6 +114,32 @@ fn title_skips_synthetic_command_messages() {
 
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].title, "the actual human request");
+}
+
+#[test]
+fn slash_command_sessions_are_titled_by_their_command() {
+    // A session started by a slash command records the human's action
+    // as a <command-message>/<command-name> wrapper, and skills then
+    // inject generated text like "Base directory for this skill: ...".
+    // The title must be the command, not the injected text.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("eeee1111-2222-3333-4444-555566667777.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<command-message>code-review</command-message>\n<command-name>code-review</command-name>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"Base directory for this skill: /Users/brian/.claude/skills/code-review\n\nReview the diff..."},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "/code-review");
 }
 
 #[test]
