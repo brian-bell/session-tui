@@ -12,12 +12,23 @@ cargo run --release          # run the TUI
 cargo test                   # full suite (spawns real PTYs; unix only)
 cargo clippy --all-targets   # kept at zero warnings
 cargo run --release --example scan   # scan real session stores, print timing
+python3 scripts/e2e.py               # end-to-end PTY driver (builds release first)
 ```
 
 There is no Makefile. CI (`.github/workflows/ci.yml`) runs `cargo test`
 and `cargo clippy --all-targets -- -D warnings` on pushes to main and on
 PRs. Tests use `tempfile` fixtures and real `/bin/sh` children; they
 require a Unix host (CI uses ubuntu-latest).
+
+`scripts/e2e.py` (Python 3 stdlib, unix only) is the end-to-end check:
+it runs the release binary in a real PTY with a hermetic `$HOME` (fixture
+transcript) and a fake `claude` shim on `PATH`, then drives
+list → picker → launch → input passthrough → focus toggle → kill → quit,
+asserting on rendered frames. It covers what unit tests can't — crossterm
+key encoding quirks, PTY lifecycle, real rendering — and its assertions
+are whitespace-insensitive because ratatui's frame diffing draws blank
+cells as cursor moves. Set `SESSION_TUI_BIN` to test a prebuilt binary.
+Exit code 0 means all checks passed.
 
 ## Architecture
 
