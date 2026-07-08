@@ -59,6 +59,48 @@ fn renders_session_list_left_and_terminal_placeholder_right() {
 }
 
 #[test]
+fn drawn_terminal_pane_and_pty_size_agree() {
+    // The invariant behind "terminal_pane_size is the single source of
+    // PTY dimensions": the size handed to the PTY must equal the inner
+    // size of the pane render() actually draws, or the child renders
+    // at one size into a pane of another. Expectations are read from
+    // the rendered buffer so this pins agreement, not a copy of the
+    // layout math.
+    for (w, h) in [(100u16, 30u16), (81, 24), (33, 9)] {
+        let app = App::new(vec![meta("s1", Agent::Claude, "one")]);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| ui::render(f, &app, None, &Default::default()))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        // The right pane's top-left corner is the second '┌' on row 0
+        // (every cell in that row is a width-1 symbol, so char index
+        // == column).
+        let right_x = text
+            .lines()
+            .next()
+            .unwrap()
+            .chars()
+            .enumerate()
+            .filter(|(_, c)| *c == '┌')
+            .nth(1)
+            .map(|(i, _)| i)
+            .unwrap() as u16;
+        let drawn_outer_w = w - right_x;
+        let drawn_outer_h = h - 1; // help bar takes the last row
+
+        let (rows, cols) =
+            ui::terminal_pane_size(ratatui::layout::Rect::new(0, 0, w, h));
+        assert_eq!(
+            (rows, cols),
+            (drawn_outer_h - 2, drawn_outer_w - 2),
+            "PTY size must match the drawn pane's interior at {w}x{h}"
+        );
+    }
+}
+
+#[test]
 fn transcript_derived_strings_render_without_control_characters() {
     // cwd comes straight from JSONL and may contain hostile bytes; no
     // control character may reach a rendered cell (we sanitize at the

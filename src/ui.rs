@@ -16,36 +16,49 @@ use crate::term::SessionStatus;
 /// Fraction of the frame given to the session list.
 pub const LIST_PERCENT: u16 = 25;
 
+/// Every rect in the frame, computed once: the split `render` draws
+/// and the PTY size from `terminal_pane_size` cannot disagree.
+struct Panes {
+    /// The list+terminal region, used for overlay centering.
+    main: Rect,
+    list: Rect,
+    terminal: Rect,
+    help: Rect,
+}
+
+fn panes(frame: Rect) -> Panes {
+    let [main, help] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame);
+    let [list, terminal] = Layout::horizontal([
+        Constraint::Percentage(LIST_PERCENT),
+        Constraint::Percentage(100 - LIST_PERCENT),
+    ])
+    .areas(main);
+    Panes { main, list, terminal, help }
+}
+
 pub fn render(
     f: &mut Frame,
     app: &App,
     screen: Option<&vt100::Screen>,
     statuses: &HashMap<RunId, SessionStatus>,
 ) {
-    let [main, help] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
-    let [left, right] = Layout::horizontal([
-        Constraint::Percentage(LIST_PERCENT),
-        Constraint::Percentage(100 - LIST_PERCENT),
-    ])
-    .areas(main);
-
-    render_list(f, app, statuses, left);
-    render_terminal(f, app, screen, right);
-    render_help(f, app, help);
-    render_overlay(f, app, main);
+    let panes = panes(f.area());
+    render_list(f, app, statuses, panes.list);
+    render_terminal(f, app, screen, panes.terminal);
+    render_help(f, app, panes.help);
+    render_overlay(f, app, panes.main);
 }
 
 /// The inner size of the terminal pane for a given frame size; PTYs are
-/// kept at exactly this size.
+/// kept at exactly this size. The interior is derived from a `Block`
+/// with the same borders `render_terminal` draws, so the border math
+/// can't drift either.
 pub fn terminal_pane_size(frame: Rect) -> (u16, u16) {
-    let [main, _] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame);
-    let [_, right] = Layout::horizontal([
-        Constraint::Percentage(LIST_PERCENT),
-        Constraint::Percentage(100 - LIST_PERCENT),
-    ])
-    .areas(main);
-    (right.height.saturating_sub(2), right.width.saturating_sub(2))
+    let inner = Block::default()
+        .borders(Borders::ALL)
+        .inner(panes(frame).terminal);
+    (inner.height, inner.width)
 }
 
 fn render_list(f: &mut Frame, app: &App, statuses: &HashMap<RunId, SessionStatus>, area: Rect) {
