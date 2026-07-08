@@ -1,4 +1,10 @@
 /target
 
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
 # Beads local activity log (machine-local churn; issue sync uses refs/dolt/data)
 .beads/interactions.jsonl
