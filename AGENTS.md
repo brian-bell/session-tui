@@ -42,7 +42,11 @@ One binary crate plus a library, `src/`:
   synthetic wrappers (`<command-*>`, `<local-command-*>`) are skipped,
   and slash-command sessions are titled `/<command-name>`. Control
   characters are stripped at parse time. `ensure_store_roots` creates
-  missing store roots with 0700.
+  missing store roots with 0700. `Scanner` makes rescans incremental:
+  it caches parse results per path keyed on (mtime, len) — including
+  parsed-and-rejected files — so a watcher rescan only reparses
+  changed/new transcripts and drops entries for deleted ones; the
+  scanner thread holds one instance for its lifetime.
 - `term.rs` — one live session. `PtySession` spawns a child via
   portable-pty, drains output on a reader thread into a `vt100::Parser`
   (10k scrollback), and exposes input/resize/kill/status. `CommandSpec`

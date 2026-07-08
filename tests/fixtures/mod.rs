@@ -38,6 +38,28 @@ pub fn write_codex_session(
     .unwrap();
 }
 
+/// Rewrite a file in place while preserving its observable stat: the
+/// new content must have the same byte length, and the original mtime
+/// is restored after the write. A scanner keyed on (mtime, len) must
+/// treat the file as unchanged — so if the old parse result is still
+/// returned, the file was provably not reparsed.
+pub fn rewrite_preserving_stat(path: &Path, content: &str) {
+    let meta = fs::metadata(path).unwrap();
+    assert_eq!(
+        meta.len(),
+        content.len() as u64,
+        "helper misuse: replacement content must keep the file length"
+    );
+    let mtime = meta.modified().unwrap();
+    fs::write(path, content).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+}
+
 /// Write a minimal Claude Code transcript mimicking ~/.claude/projects layout:
 /// <root>/<encoded-cwd>/<session-id>.jsonl with a first user message line.
 pub fn write_claude_session(
