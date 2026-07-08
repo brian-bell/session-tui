@@ -62,8 +62,10 @@ One binary crate plus a library, `src/`:
   encoding to `input.rs`, and picker state to `picker.rs`. `handle_key`/`handle_paste` take the child's
   `TermModes` as a parameter — App holds no synced mode state.
 - `ui.rs` — ratatui rendering: 25/75 layout, session rows, tui-term
-  pane, overlays, help/notice bar. `terminal_pane_size` is the single
-  source of PTY dimensions.
+  pane, overlays, help/notice bar. `panes` computes the frame geometry
+  once; `render` and `terminal_pane_size` (the single source of PTY
+  dimensions) both consume it, so the drawn pane and the PTY size
+  cannot disagree.
 - `main.rs` — composition root: crossterm event loop, effect execution,
   child reaping, notify-based store watcher (500ms debounce), and
   `TerminalGuard` (restores the terminal on every exit path).
