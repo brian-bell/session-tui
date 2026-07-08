@@ -12,6 +12,19 @@ pub enum Agent {
     Codex,
 }
 
+impl Agent {
+    /// Whether resuming writes the continuation to a NEW transcript id.
+    /// `claude --resume` forks; `codex resume` appends to the same
+    /// rollout. Drives fork adoption in the roster — an agent that
+    /// appends in place must never wait for (or claim) a new transcript.
+    pub fn forks_on_resume(self) -> bool {
+        match self {
+            Agent::Claude => true,
+            Agent::Codex => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
     pub id: String,

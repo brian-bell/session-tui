@@ -223,6 +223,227 @@ fn a_resumed_row_keeps_its_run_across_rescans() {
 }
 
 #[test]
+fn absorb_scan_moves_the_run_to_a_forked_transcript_after_resume() {
+    // `claude --resume` writes the continued conversation to a NEW
+    // transcript id; the original file never updates again (hence the
+    // reused meta with its pre-resume mtime). The run must follow the
+    // fork or the original row stays "running" forever and the fork
+    // row would spawn a second resume of the same conversation.
+    let orig = meta("orig", "/p");
+    let mut roster = Roster::new(vec![orig.clone()]);
+    let (run_id, _) = roster.resume_selected().unwrap();
+
+    roster.absorb_scan(vec![post_launch(meta("fork", "/p")), orig]);
+
+    let fork = roster.rows().iter().find(|r| r.transcript_id() == Some("fork")).unwrap();
+    assert_eq!(fork.run_id(), Some(run_id), "the live PTY follows the fork");
+    let orig = roster.rows().iter().find(|r| r.transcript_id() == Some("orig")).unwrap();
+    assert_eq!(orig.run_id(), None, "the original row is no longer running");
+    assert!(roster.is_running(run_id));
+}
+
+#[test]
+fn selection_follows_the_run_to_the_forked_transcript() {
+    let orig = meta("orig", "/p");
+    let mut roster = Roster::new(vec![orig.clone()]);
+    roster.resume_selected().unwrap();
+
+    roster.absorb_scan(vec![post_launch(meta("fork", "/p")), orig]);
+
+    assert_eq!(
+        roster.selected_row().unwrap().transcript_id(),
+        Some("fork"),
+        "the user is attached to that terminal; selection follows it"
+    );
+}
+
+#[test]
+fn a_resumed_row_keeps_its_run_when_no_fork_appears() {
+    // Agents that append to the same transcript (codex) never produce
+    // a fork candidate; the resumed row must stay running as-is.
+    let mut roster = Roster::new(vec![meta("orig", "/p")]);
+    let (run_id, _) = roster.resume_selected().unwrap();
+
+    roster.absorb_scan(vec![meta("orig", "/p")]);
+
+    assert_eq!(roster.rows()[0].run_id(), Some(run_id));
+}
+
+#[test]
+fn fork_adoption_skips_transcripts_known_at_resume_time() {
+    // A sibling session in the same cwd gets its mtime bumped by work
+    // outside the TUI; the resume snapshot says it already existed.
+    let orig = meta("orig", "/p");
+    let mut roster = Roster::new(vec![orig.clone(), meta("other", "/p")]);
+    let (run_id, _) = roster.resume_selected().unwrap();
+
+    roster.absorb_scan(vec![post_launch(meta("other", "/p")), orig]);
+
+    let orig = roster.rows().iter().find(|r| r.transcript_id() == Some("orig")).unwrap();
+    assert_eq!(orig.run_id(), Some(run_id), "the run stays home");
+    let other = roster.rows().iter().find(|r| r.transcript_id() == Some("other")).unwrap();
+    assert_eq!(other.run_id(), None);
+}
+
+#[test]
+fn fork_adoption_holds_off_with_two_candidate_transcripts() {
+    let orig = meta("orig", "/p");
+    let mut roster = Roster::new(vec![orig.clone()]);
+    let (run_id, _) = roster.resume_selected().unwrap();
+
+    roster.absorb_scan(vec![
+        post_launch(meta("c1", "/p")),
+        post_launch(meta("c2", "/p")),
+        orig,
+    ]);
+
+    let orig = roster.rows().iter().find(|r| r.transcript_id() == Some("orig")).unwrap();
+    assert_eq!(orig.run_id(), Some(run_id), "mtimes can't say which is the fork");
+    assert!(roster
+        .rows()
+        .iter()
+        .filter(|r| r.transcript_id() != Some("orig"))
+        .all(|r| r.run_id().is_none()));
+}
+
+#[test]
+fn fork_adoption_holds_off_with_two_pending_resumes_in_the_same_cwd() {
+    // Two resumed sessions in one agent+cwd: a single new transcript
+    // cannot be attributed to either process.
+    let (r1, r2) = (meta("r1", "/p"), meta("r2", "/p"));
+    let mut roster = Roster::new(vec![r1.clone(), r2.clone()]);
+    let (run1, _) = roster.resume_selected().unwrap();
+    roster.move_selection(1);
+    let (run2, _) = roster.resume_selected().unwrap();
+
+    roster.absorb_scan(vec![post_launch(meta("fork", "/p")), r1, r2]);
+
+    let by_id = |id: &str| roster.rows().iter().find(|r| r.transcript_id() == Some(id)).unwrap();
+    assert_eq!(by_id("r1").run_id(), Some(run1), "both runs must stay home");
+    assert_eq!(by_id("r2").run_id(), Some(run2), "both runs must stay home");
+    assert_eq!(by_id("fork").run_id(), None);
+}
+
+#[test]
+fn a_launch_and_a_pending_resume_in_the_same_cwd_block_each_other() {
+    // A provisional launch and a resumed session both wait for a new
+    // transcript in the same agent+cwd; one new file can't be
+    // attributed to either process, so neither side may adopt it.
+    let orig = meta("orig", "/p");
+    let mut roster = Roster::new(vec![orig.clone()]);
+    let (resume_run, _) = roster.resume_selected().unwrap();
+    let (launch_run, _) = roster.launch(Agent::Claude, "/p");
+
+    roster.absorb_scan(vec![post_launch(meta("fresh", "/p")), orig]);
+
+    assert_eq!(
+        roster.rows().iter().filter(|r| r.is_provisional()).count(),
+        1,
+        "the placeholder must survive"
+    );
+    assert!(roster.is_running(launch_run));
+    let orig = roster.rows().iter().find(|r| r.transcript_id() == Some("orig")).unwrap();
+    assert_eq!(orig.run_id(), Some(resume_run), "the resume's run stays home");
+    let fresh = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh.run_id(), None);
+}
+
+#[test]
+fn a_codex_resume_never_adopts_a_new_transcript() {
+    // codex appends to the resumed rollout in place; a new codex
+    // transcript in the same cwd belongs to someone else, even before
+    // the first append lands in a scan.
+    let mut r = meta("r", "/p");
+    r.agent = Agent::Codex;
+    let mut roster = Roster::new(vec![r.clone()]);
+    let (run_id, _) = roster.resume_selected().unwrap();
+
+    let mut unrelated = post_launch(meta("n", "/p"));
+    unrelated.agent = Agent::Codex;
+    roster.absorb_scan(vec![unrelated, r]);
+
+    let by_id = |id: &str| roster.rows().iter().find(|r| r.transcript_id() == Some(id)).unwrap();
+    assert_eq!(by_id("r").run_id(), Some(run_id), "the run stays on the resumed row");
+    assert_eq!(by_id("n").run_id(), None);
+}
+
+#[test]
+fn an_in_place_append_after_resume_stops_competing_for_new_transcripts() {
+    // An append to the resumed transcript itself proves the agent
+    // continues in place rather than forking (codex-style). The row
+    // must stop competing, or it would block launch adoption in this
+    // cwd forever.
+    let mut roster = Roster::new(vec![meta("r", "/p")]);
+    let (resume_run, _) = roster.resume_selected().unwrap();
+    roster.absorb_scan(vec![post_launch(meta("r", "/p"))]); // in-place append observed
+
+    let (launch_run, _) = roster.launch(Agent::Claude, "/p");
+    roster.absorb_scan(vec![post_launch(meta("fresh", "/p")), post_launch(meta("r", "/p"))]);
+
+    let fresh = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh.run_id(), Some(launch_run), "the placeholder adopts unhindered");
+    let r = roster.rows().iter().find(|r| r.transcript_id() == Some("r")).unwrap();
+    assert_eq!(r.run_id(), Some(resume_run));
+}
+
+#[test]
+fn resuming_a_candidate_does_not_resolve_a_fork_ambiguity() {
+    // Two new transcripts appeared post-resume: either could be a's
+    // fork. The user then resumes one of them (and it proves
+    // in-place) — that says nothing about which file a's process
+    // wrote, so treating the other as uniquely attributable would be
+    // a guess. The run stays home.
+    let a = meta("a", "/p");
+    let mut roster = Roster::new(vec![a.clone()]);
+    let (run_a, _) = roster.resume_selected().unwrap();
+    let (d, e) = (post_launch(meta("d", "/p")), post_launch(meta("e", "/p")));
+    roster.absorb_scan(vec![d, e.clone(), a.clone()]);
+
+    roster.move_selection(-2); // scan order d, e, a; selection stayed on "a"
+    assert_eq!(roster.selected_row().unwrap().transcript_id(), Some("d"));
+    let (run_d, _) = roster.resume_selected().unwrap();
+    roster.absorb_scan(vec![post_launch(meta("d", "/p")), e, a]);
+
+    let by_id = |id: &str| roster.rows().iter().find(|r| r.transcript_id() == Some(id)).unwrap();
+    assert_eq!(by_id("a").run_id(), Some(run_a), "the ambiguity never resolved");
+    assert_eq!(by_id("d").run_id(), Some(run_d));
+    assert_eq!(by_id("e").run_id(), None);
+}
+
+#[test]
+fn a_fork_is_adopted_even_when_the_origin_vanishes_from_the_scan() {
+    // The scan that discovers the fork can transiently lose the
+    // original transcript (parse failure, deletion). The fork is
+    // still the only plausible attribution; the orphaned origin row
+    // must not squat on the run.
+    let orig = meta("orig", "/p");
+    let mut roster = Roster::new(vec![orig.clone()]);
+    let (run_id, _) = roster.resume_selected().unwrap();
+
+    roster.absorb_scan(vec![post_launch(meta("fork", "/p"))]);
+
+    let fork = roster.rows().iter().find(|r| r.transcript_id() == Some("fork")).unwrap();
+    assert_eq!(fork.run_id(), Some(run_id), "the run follows the fork");
+    assert!(
+        roster.rows().iter().all(|r| r.transcript_id() != Some("orig")),
+        "a runless row missing from the scan has nothing to show"
+    );
+    assert_eq!(roster.selected_row().unwrap().transcript_id(), Some("fork"));
+}
+
+#[test]
+fn a_fork_scanned_after_exit_is_a_plain_idle_row() {
+    // The process died before its fork hit a scan: nothing to adopt.
+    let mut roster = Roster::new(vec![meta("orig", "/p")]);
+    let (run_id, _) = roster.resume_selected().unwrap();
+    roster.mark_exited(run_id);
+
+    roster.absorb_scan(vec![post_launch(meta("fork", "/p")), meta("orig", "/p")]);
+
+    assert!(!roster.has_running());
+}
+
+#[test]
 fn a_running_row_missing_from_a_scan_is_not_dropped() {
     // A transient parse failure can make a transcript vanish from one
     // scan. Dropping the row would orphan its live PTY with no way to

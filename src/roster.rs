@@ -19,6 +19,26 @@ enum Identity {
     Transcript(String),
 }
 
+/// A live PTY attached to a transcript row, plus the fork-adoption
+/// state a resume carries until the agent's first write is scanned.
+#[derive(Debug, Clone)]
+struct Run {
+    id: RunId,
+    pending_fork: Option<PendingFork>,
+}
+
+/// `claude --resume` forks a NEW transcript id; the original file never
+/// updates again. Until the fork appears in a scan, the resumed row
+/// remembers what it knew at resume time so the fork can be attributed
+/// to this run and no other.
+#[derive(Debug, Clone)]
+struct PendingFork {
+    /// Transcript ids that already existed at resume time (including
+    /// the resumed one); they necessarily belong to other sessions.
+    snapshot: HashSet<String>,
+    since: DateTime<Utc>,
+}
+
 /// One session in the list: scanned metadata (or launch placeholders)
 /// plus the live run, if any.
 #[derive(Debug, Clone)]
@@ -26,7 +46,7 @@ pub struct Row {
     identity: Identity,
     /// Live PTY of a resumed/adopted transcript row; a provisional
     /// row's run lives in its identity.
-    run: Option<RunId>,
+    run: Option<Run>,
     agent: Agent,
     cwd: String,
     title: String,
@@ -34,7 +54,7 @@ pub struct Row {
 }
 
 impl Row {
-    fn from_meta(meta: SessionMeta, run: Option<RunId>) -> Self {
+    fn from_meta(meta: SessionMeta, run: Option<Run>) -> Self {
         Self {
             identity: Identity::Transcript(meta.id),
             run,
@@ -48,7 +68,7 @@ impl Row {
     pub fn run_id(&self) -> Option<RunId> {
         match &self.identity {
             Identity::Provisional { run_id, .. } => Some(*run_id),
-            Identity::Transcript(_) => self.run,
+            Identity::Transcript(_) => self.run.as_ref().map(|r| r.id),
         }
     }
 
@@ -188,9 +208,18 @@ impl Roster {
             return None;
         }
         let id = row.transcript_id()?.to_string();
-        let spec = CommandSpec::resume_id(row.agent, &id, &row.cwd);
+        let agent = row.agent;
+        let spec = CommandSpec::resume_id(agent, &id, &row.cwd);
         let run_id = self.alloc_run_id();
-        self.rows[self.selected].run = Some(run_id);
+        let pending_fork = agent.forks_on_resume().then(|| {
+            let snapshot = self
+                .rows
+                .iter()
+                .filter_map(|r| r.transcript_id().map(str::to_string))
+                .collect();
+            PendingFork { snapshot, since: Utc::now() }
+        });
+        self.rows[self.selected].run = Some(Run { id: run_id, pending_fork });
         Some((run_id, spec))
     }
 
@@ -201,7 +230,7 @@ impl Roster {
     pub fn mark_exited(&mut self, run_id: RunId) {
         let key = self.selected_key();
         for row in &mut self.rows {
-            if row.run == Some(run_id) {
+            if row.run.as_ref().map(|r| r.id) == Some(run_id) {
                 row.run = None;
             }
         }
@@ -224,17 +253,21 @@ impl Roster {
 
         let scanned_ids: HashSet<String> = scanned.iter().map(|m| m.id.clone()).collect();
         let mut provisionals: Vec<Row> = Vec::new();
-        let mut prev_runs: HashMap<String, RunId> = HashMap::new();
+        // Running transcript rows, by id: their runs carry over to the
+        // fresh scan, and a pending fork may hand its run to a newly
+        // written transcript below.
+        let mut running: HashMap<String, Row> = HashMap::new();
         // A running row whose transcript momentarily vanished from the
         // scan keeps its place: dropping it would orphan the live PTY
         // with no way to reattach when the transcript reappears.
         let mut stragglers: Vec<Row> = Vec::new();
         for row in self.rows.drain(..) {
-            match (&row.identity, row.run) {
+            match (&row.identity, &row.run) {
                 (Identity::Provisional { .. }, _) => provisionals.push(row),
-                (Identity::Transcript(id), Some(run)) => {
-                    prev_runs.insert(id.clone(), run);
-                    if !scanned_ids.contains(id) {
+                (Identity::Transcript(id), Some(_)) => {
+                    if scanned_ids.contains(id) {
+                        running.insert(id.clone(), row);
+                    } else {
                         stragglers.push(row);
                     }
                 }
@@ -242,11 +275,59 @@ impl Roster {
             }
         }
 
-        let mut siblings: HashMap<(Agent, String), usize> = HashMap::new();
-        for p in &provisionals {
-            *siblings.entry((p.agent, p.cwd.clone())).or_default() += 1;
+        // An append to the resumed transcript itself proves the agent
+        // continues in place rather than forking: nothing to wait for,
+        // and staying a waiter would block adoption in this cwd forever.
+        for row in running.values_mut() {
+            let Identity::Transcript(id) = &row.identity else { continue };
+            if let Some(run) = &mut row.run
+                && let Some(pending) = &run.pending_fork
+                && scanned.iter().any(|s| &s.id == id && s.timestamp > pending.since)
+            {
+                run.pending_fork = None;
+            }
         }
-        let mut adopted: HashMap<String, RunId> = HashMap::new();
+
+        // Every process that could plausibly write a new transcript in
+        // an agent+cwd competes for it: provisional launches and
+        // pending-fork resumes alike. More than one waiter means a new
+        // transcript can't be attributed, so neither pass may adopt.
+        let mut siblings: HashMap<(Agent, String), usize> = HashMap::new();
+        let waiting = |row: &Row| row.run.as_ref().is_some_and(|r| r.pending_fork.is_some());
+        for row in provisionals
+            .iter()
+            .chain(running.values().filter(|r| waiting(r)))
+            .chain(stragglers.iter().filter(|r| waiting(r)))
+        {
+            *siblings.entry((row.agent, row.cwd.clone())).or_default() += 1;
+        }
+        let mut adopted: HashMap<String, Run> = HashMap::new();
+        // The sole transcript a waiting process could have written:
+        // right agent + cwd, written after the wait began, unknown when
+        // the wait began. Uniqueness is judged on that full plausible
+        // set — that a member is already running or claimed doesn't
+        // reveal which file THIS process wrote, so it blocks adoption
+        // rather than shrinking the set toward a guess.
+        let unique_candidate = |adopted: &HashMap<String, Run>,
+                                agent: Agent,
+                                cwd: &str,
+                                since: DateTime<Utc>,
+                                snapshot: &HashSet<String>| {
+            let mut plausible = scanned.iter().filter(|s| {
+                s.agent == agent
+                    && s.cwd == cwd
+                    && s.timestamp >= since
+                    && !snapshot.contains(&s.id)
+            });
+            let candidate = plausible.next()?;
+            if plausible.next().is_some()
+                || running.contains_key(&candidate.id)
+                || adopted.contains_key(&candidate.id)
+            {
+                return None;
+            }
+            Some(candidate.id.clone())
+        };
         provisionals.retain(|p| {
             if siblings[&(p.agent, p.cwd.clone())] > 1 {
                 return true;
@@ -254,31 +335,61 @@ impl Roster {
             let Identity::Provisional { run_id, snapshot } = &p.identity else {
                 return true;
             };
-            let candidates: Vec<&SessionMeta> = scanned
-                .iter()
-                .filter(|s| {
-                    s.agent == p.agent
-                        && s.cwd == p.cwd
-                        && s.timestamp >= p.timestamp
-                        && !prev_runs.contains_key(&s.id)
-                        && !adopted.contains_key(&s.id)
-                        && !snapshot.contains(&s.id)
-                })
-                .collect();
-            let [candidate] = candidates[..] else {
+            let Some(candidate) =
+                unique_candidate(&adopted, p.agent, &p.cwd, p.timestamp, snapshot)
+            else {
                 return true;
             };
-            adopted.insert(candidate.id.clone(), *run_id);
+            adopted.insert(candidate.clone(), Run { id: *run_id, pending_fork: None });
             if selected_key == Some(Key::Run(*run_id)) {
-                selected_key = Some(Key::Id(candidate.id.clone()));
+                selected_key = Some(Key::Id(candidate));
             }
             false
         });
 
+        // Fork adoption: a resumed row whose agent wrote a NEW
+        // transcript hands its run to that transcript, under the same
+        // unambiguity rules as launch adoption. No candidate is the
+        // normal case for agents that append in place — the row simply
+        // keeps its run.
+        let forks: Vec<(String, String)> = running
+            .values()
+            .chain(stragglers.iter())
+            .filter_map(|row| {
+                let pending = row.run.as_ref()?.pending_fork.as_ref()?;
+                if siblings[&(row.agent, row.cwd.clone())] > 1 {
+                    return None;
+                }
+                let candidate = unique_candidate(
+                    &adopted,
+                    row.agent,
+                    &row.cwd,
+                    pending.since,
+                    &pending.snapshot,
+                )?;
+                Some((row.transcript_id()?.to_string(), candidate))
+            })
+            .collect();
+        for (origin, fork_id) in forks {
+            // An origin missing from the scan loses its row entirely:
+            // with the run handed over there is nothing left to show.
+            let row = running.remove(&origin).or_else(|| {
+                let pos = stragglers.iter().position(|r| r.transcript_id() == Some(&*origin))?;
+                Some(stragglers.remove(pos))
+            });
+            let Some(run) = row.and_then(|r| r.run) else { continue };
+            adopted.insert(fork_id.clone(), Run { id: run.id, pending_fork: None });
+            if selected_key == Some(Key::Id(origin)) {
+                selected_key = Some(Key::Id(fork_id));
+            }
+        }
+
         let mut transcript_rows: Vec<Row> = scanned
             .into_iter()
             .map(|m| {
-                let run = adopted.get(&m.id).or_else(|| prev_runs.get(&m.id)).copied();
+                let run = adopted
+                    .remove(&m.id)
+                    .or_else(|| running.get(&m.id).and_then(|r| r.run.clone()));
                 Row::from_meta(m, run)
             })
             .collect();
