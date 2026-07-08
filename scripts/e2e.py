@@ -133,12 +133,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="session-tui-e2e-") as tmp:
         root = Path(tmp)
         home = root / "home"
-        # Distinct cwds so the launched session can't be confused with (or
-        # adopted by) the fixture transcript's row.
-        fixture_cwd = root / "work" / "fixture-cwd"
+        # The fixture transcript's cwd lives *inside* the launch dir, so the
+        # typed launch path substring-matches a known picker row and
+        # chosen_dir's typed-path-over-match precedence is genuinely on the
+        # line (the picker trap this harness originally caught). The cwds
+        # are still distinct, so the launched session can't be confused
+        # with (or adopted by) the fixture transcript's row.
         launch_dir = root / "work" / "e2e-target"
+        fixture_cwd = launch_dir / "fixture-cwd"
         fixture_cwd.mkdir(parents=True)
-        launch_dir.mkdir(parents=True)
         write_fixture_transcript(home, fixture_cwd)
         shim = root / "shim"
         shim.mkdir()
