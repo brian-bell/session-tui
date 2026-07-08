@@ -95,10 +95,20 @@ fixtures in `tests/fixtures/mod.rs`.
   (`Row::is_provisional`) with no transcript. On rescan it is *adopted*
   by a scanned transcript only when unambiguous: same agent + cwd,
   mtime >= launch, transcript id not in the launch snapshot, exactly
-  one candidate, and no sibling placeholder in the same agent+cwd.
+  one candidate, and no competing waiter (another provisional launch
+  or a pending-fork resume) in the same agent+cwd.
   Provisional rows are dropped when their process exits (nothing to
   resume); a running transcript row that vanishes from a scan is kept
   so its PTY stays reattachable.
+- **Fork adoption**: `claude --resume` forks a NEW transcript id, so
+  resuming a forking agent (`Agent::forks_on_resume`) carries a pending
+  fork (snapshot of known transcript ids + resume time) and
+  `absorb_scan` hands its run to the fork under the same unambiguity
+  rules; the original row becomes historical again. codex appends in
+  place and never carries one. No candidate means the row keeps its
+  run, and an append to the resumed transcript itself clears the
+  pending fork so the row stops competing with launches in its cwd.
+  Domain terms in `CONTEXT.md`.
 - **cwd handling**: picker cwds are canonicalized (transcripts record
   the child's resolved getcwd — `/tmp` is a symlink on macOS). Missing
   cwds are refused on both launch and resume because portable-pty

@@ -382,6 +382,36 @@ fn rescan_adopts_the_real_transcript_into_the_provisional_row() {
 }
 
 #[test]
+fn after_fork_adoption_the_original_row_resumes_fresh() {
+    // `claude --resume` forked: the run followed the new transcript id.
+    // The original row is historical again — Enter on it must be a
+    // fresh resume, not an attach to the fork's terminal (and never a
+    // second resume of the fork's conversation).
+    let s1 = meta("s1", "one");
+    let mut app = App::new(vec![s1.clone()]);
+    press(&mut app, key(KeyCode::Enter)); // resume s1
+    let run_id = app.attached_run().unwrap();
+
+    let mut fork = meta("fork", "one (forked)");
+    fork.timestamp = chrono::Utc::now() + chrono::Duration::seconds(1);
+    app.update_sessions(vec![fork, s1]);
+
+    assert_eq!(app.run_id_for("fork"), Some(run_id), "the run followed the fork");
+    assert_eq!(app.run_id_for("s1"), None);
+
+    press(&mut app, ctrl('\\')); // back to the list; selection sits on the fork
+    press(&mut app, key(KeyCode::Down)); // original row
+    let effects = press(&mut app, key(KeyCode::Enter));
+    match &effects[..] {
+        [Effect::Spawn { run_id: new_run, spec }] => {
+            assert_eq!(spec.args, vec!["--resume", "s1"]);
+            assert_ne!(*new_run, run_id, "a fresh run, distinct from the fork's");
+        }
+        other => panic!("expected one Spawn effect, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_session_whose_child_exits_detaches_and_stops_showing_as_running() {
     let mut app = App::new(vec![meta("s1", "one")]);
     press(&mut app, key(KeyCode::Enter));

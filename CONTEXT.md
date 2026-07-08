@@ -23,5 +23,20 @@ gets a name here, code should use that name.
 - **Launch snapshot** — the transcript ids that existed when a
   provisional session was launched. Those belong to other sessions, so
   only a transcript outside the snapshot may be adopted.
+- **Fork adoption** — `claude --resume` writes the continuation to a
+  NEW transcript id; a rescan hands the resumed row's run to that fork
+  under the same snapshot + unambiguity rules as launch adoption. An
+  agent that instead appends in place (codex) produces no candidate and
+  simply keeps its run.
+- **Pending fork** — the wait state a forking agent's resume
+  (`Agent::forks_on_resume`) carries until its fork is attributed: a
+  snapshot of the transcript ids known at resume time, plus the resume
+  timestamp. Never set for in-place agents (codex). Cleared when the
+  fork is adopted, when the resumed transcript itself advances (proof
+  of in-place appending), or when the process exits.
+- **Waiter** — any process that could plausibly write a new transcript
+  in an agent + cwd: a provisional launch or a pending-fork resume.
+  Two waiters in the same agent + cwd block all adoption there — a new
+  transcript can't be attributed to either.
 - **Run** — one live PTY, identified by a `RunId` for the lifetime of
   the app. A session may gain and lose runs; the transcript persists.
