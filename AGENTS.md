@@ -14,8 +14,10 @@ cargo clippy --all-targets   # kept at zero warnings
 cargo run --release --example scan   # scan real session stores, print timing
 ```
 
-There is no Makefile or CI config yet. Tests use `tempfile` fixtures and
-real `/bin/sh` children; they require a Unix host.
+There is no Makefile. CI (`.github/workflows/ci.yml`) runs `cargo test`
+and `cargo clippy --all-targets -- -D warnings` on pushes to main and on
+PRs. Tests use `tempfile` fixtures and real `/bin/sh` children; they
+require a Unix host (CI uses ubuntu-latest).
 
 ## Architecture
 
