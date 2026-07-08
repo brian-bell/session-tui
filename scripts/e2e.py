@@ -50,7 +50,17 @@ def build_binary() -> Path:
     if override:
         return Path(override)
     subprocess.run(["cargo", "build", "--release"], cwd=REPO, check=True)
-    return REPO / "target" / "release" / "session-tui"
+    # Ask Cargo where artifacts land: CARGO_TARGET_DIR / build.target-dir
+    # redirect them away from <repo>/target.
+    meta = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        cwd=REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    target_dir = Path(json.loads(meta.stdout)["target_directory"])
+    return target_dir / "release" / "session-tui"
 
 
 def drain(fd: int, secs: float) -> None:
