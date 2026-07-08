@@ -190,7 +190,7 @@ fn render_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
     let popup = centered(area, (area.width * 6 / 10).max(40), h);
     f.render_widget(Clear, popup);
 
-    let agent = match picker.agent {
+    let agent = match picker.agent() {
         Agent::Claude => "claude",
         Agent::Codex => "codex",
     };
@@ -198,11 +198,11 @@ fn render_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
         Span::styled("agent: ", Style::default().fg(Color::DarkGray)),
         Span::styled(agent, Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("  (Tab switches)   path: ", Style::default().fg(Color::DarkGray)),
-        Span::raw(picker.input.clone()),
+        Span::raw(picker.input().to_string()),
         Span::styled("▏", Style::default().fg(Color::Yellow)),
     ])];
     for (i, dir) in picker.matches().iter().enumerate() {
-        let style = if i == picker.highlighted {
+        let style = if i == picker.highlighted() {
             Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
         } else {
             Style::default()

@@ -42,6 +42,11 @@ One binary crate plus a library, `src/`:
   (honoring `TermModes`), `encode_paste` wraps pastes for bracketed
   paste, and `is_focus_toggle` recognizes the reserved focus chord.
   The state machine holds no byte-level knowledge.
+- `picker.rs` — the new-session dialog state. Mutations (`edit`,
+  `backspace`, `paste`, `move_highlight`, `toggle_agent`) enforce the
+  picker's invariant internally: editing resets the highlight and
+  cancels explicit navigation. `chosen_dir` resolves typed-path vs
+  navigated-match precedence; fields are read via accessors.
 - `roster.rs` — the session list and its lifecycle. `Roster` owns the
   `Row`s (scanned transcripts plus provisional launches), each row's
   live run, and selection-by-identity. `launch`/`resume_selected`/
@@ -53,8 +58,8 @@ One binary crate plus a library, `src/`:
   return `Effect`s (`Spawn`, `WriteTerminal`, `Kill`, `Quit`); it never
   touches a PTY. Owns focus (List/Terminal), overlays (confirm
   quit/kill, launch picker), scrollback offset, notices, and the
-  attached run; delegates session-list state to `roster.rs` and input
-  encoding to `input.rs`. `handle_key`/`handle_paste` take the child's
+  attached run; delegates session-list state to `roster.rs`, input
+  encoding to `input.rs`, and picker state to `picker.rs`. `handle_key`/`handle_paste` take the child's
   `TermModes` as a parameter — App holds no synced mode state.
 - `ui.rs` — ratatui rendering: 25/75 layout, session rows, tui-term
   pane, overlays, help/notice bar. `terminal_pane_size` is the single

@@ -434,7 +434,7 @@ fn pasting_into_the_launch_picker_fills_the_path_field() {
         panic!("picker should still be open");
     };
     // Control chars (including the newline) must not survive.
-    assert_eq!(picker.input, "/tmp/someproject");
+    assert_eq!(picker.input(), "/tmp/someproject");
 }
 
 #[test]

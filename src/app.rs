@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::input;
 use crate::roster::Roster;
+pub use crate::picker::PickerState;
 use crate::sessions::{Agent, SessionMeta};
 use crate::term::{CommandSpec, TermModes};
 
@@ -29,58 +30,6 @@ pub enum Overlay {
     ConfirmQuit,
     ConfirmKill { run_id: RunId },
     LaunchPicker(PickerState),
-}
-
-/// New-session dialog: choose an agent and a working directory from
-/// recently used project dirs, or type a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PickerState {
-    pub agent: Agent,
-    pub dirs: Vec<String>,
-    pub highlighted: usize,
-    pub input: String,
-    /// True once the user moved the highlight; an explicit choice of a
-    /// filtered match then outranks the typed text.
-    navigated: bool,
-}
-
-impl PickerState {
-    fn new(dirs: Vec<String>) -> Self {
-        Self {
-            agent: Agent::Claude,
-            dirs,
-            highlighted: 0,
-            input: String::new(),
-            navigated: false,
-        }
-    }
-
-    /// Dirs matching the typed input (all dirs when input is empty).
-    pub fn matches(&self) -> Vec<&str> {
-        self.dirs
-            .iter()
-            .map(String::as_str)
-            .filter(|d| d.contains(self.input.as_str()))
-            .collect()
-    }
-
-    /// The cwd a launch would use right now. A typed path that exists
-    /// wins over substring matches of known dirs — unless the user
-    /// explicitly navigated the match list.
-    pub fn chosen_dir(&self) -> Option<String> {
-        if !self.navigated
-            && !self.input.is_empty()
-            && std::path::Path::new(&self.input).is_dir()
-        {
-            return Some(self.input.clone());
-        }
-        let matches = self.matches();
-        match matches.get(self.highlighted) {
-            Some(d) => Some((*d).to_string()),
-            None if !self.input.is_empty() => Some(self.input.clone()),
-            None => None,
-        }
-    }
 }
 
 pub struct App {
@@ -154,9 +103,7 @@ impl App {
     pub fn handle_paste(&mut self, text: &str, modes: TermModes) -> Vec<Effect> {
         // A paste while the launch picker is open is a project path.
         if let Overlay::LaunchPicker(ref mut picker) = self.overlay {
-            picker.input.extend(text.chars().filter(|c| !c.is_control()));
-            picker.highlighted = 0;
-            picker.navigated = false;
+            picker.paste(text);
             return Vec::new();
         }
         let (Focus::Terminal, Some(run_id)) = (self.focus, self.attached) else {
@@ -218,41 +165,27 @@ impl App {
                 Vec::new()
             }
             KeyCode::Tab => {
-                picker.agent = match picker.agent {
-                    Agent::Claude => Agent::Codex,
-                    Agent::Codex => Agent::Claude,
-                };
+                picker.toggle_agent();
                 Vec::new()
             }
             KeyCode::Down => {
-                let count = picker.matches().len();
-                if count > 0 {
-                    picker.highlighted = (picker.highlighted + 1).min(count - 1);
-                    picker.navigated = true;
-                }
+                picker.move_highlight(1);
                 Vec::new()
             }
             KeyCode::Up => {
-                picker.highlighted = picker.highlighted.saturating_sub(1);
-                picker.navigated = true;
+                picker.move_highlight(-1);
                 Vec::new()
             }
             KeyCode::Char(c) => {
-                picker.input.push(c);
-                picker.highlighted = 0;
-                // The old navigation pointed into a now-stale filtered
-                // list; the freshly typed path speaks for itself.
-                picker.navigated = false;
+                picker.edit(c);
                 Vec::new()
             }
             KeyCode::Backspace => {
-                picker.input.pop();
-                picker.highlighted = 0;
-                picker.navigated = false;
+                picker.backspace();
                 Vec::new()
             }
             KeyCode::Enter => {
-                let (agent, Some(cwd)) = (picker.agent, picker.chosen_dir()) else {
+                let (agent, Some(cwd)) = (picker.agent(), picker.chosen_dir()) else {
                     return Vec::new();
                 };
                 // Session history often points at deleted temp/worktree
