@@ -71,6 +71,7 @@ agent verbatim. Confirmation prompts default to No: only `y` confirms.
 cargo test                    # unit + integration tests (real PTYs)
 cargo clippy --all-targets    # kept at zero warnings
 cargo run --release --example scan   # scan your real stores, print timing
+python3 scripts/e2e.py               # end-to-end PTY driver (hermetic; unix only)
 ```
 
 Architecture: `sessions` (JSONL scanning) · `term` (PTY + emulator) ·
