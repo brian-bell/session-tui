@@ -16,7 +16,7 @@ use ratatui::prelude::CrosstermBackend;
 use ratatui::Terminal;
 
 use session_tui::app::{App, Effect, RunId};
-use session_tui::sessions::{scan_all_sessions, ScanRoots, SessionMeta};
+use session_tui::sessions::{ScanRoots, Scanner, SessionMeta};
 use session_tui::term::{PtySession, TermModes};
 use session_tui::ui;
 
@@ -183,12 +183,14 @@ fn spawn_input_thread(tx: mpsc::Sender<Event>) {
 }
 
 /// Initial scan plus debounced rescans whenever either session store
-/// changes on disk.
+/// changes on disk. One Scanner lives for the thread's lifetime, so
+/// rescans only reparse transcripts that changed since the last pass.
 fn spawn_scanner_thread(tx: mpsc::Sender<Event>) {
     std::thread::spawn(move || {
         let roots = ScanRoots::default();
-        let rescan = |tx: &mpsc::Sender<Event>| {
-            if let Ok(sessions) = scan_all_sessions(&roots) {
+        let mut scanner = Scanner::new();
+        let mut rescan = |tx: &mpsc::Sender<Event>| {
+            if let Ok(sessions) = scanner.scan(&roots) {
                 let _ = tx.send(Event::Scanned(sessions));
             }
         };

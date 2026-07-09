@@ -1,9 +1,9 @@
 use session_tui::sessions::{
-    scan_all_sessions, scan_claude_sessions, scan_codex_sessions, Agent, ScanRoots,
+    scan_all_sessions, scan_claude_sessions, scan_codex_sessions, Agent, ScanRoots, Scanner,
 };
 
 mod fixtures;
-use fixtures::{write_claude_session, write_codex_session};
+use fixtures::{rewrite_preserving_stat, write_claude_session, write_codex_session};
 
 #[test]
 fn scans_claude_sessions_with_metadata() {
@@ -227,6 +227,356 @@ fn titles_never_carry_control_characters() {
         "title still has control chars: {:?}",
         sessions[0].title
     );
+}
+
+#[test]
+fn scanner_matches_one_shot_scan() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-myproj",
+        "aaaa1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "claude session",
+        "2026-07-01T15:34:02.390Z",
+    );
+    write_codex_session(
+        codex_root.path(),
+        "2026/06/25",
+        "019f01b4-47cd-76c0-9d83-9aa151a3a918",
+        "/Users/brian/dev/myproj",
+        "user",
+        "codex session",
+    );
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+
+    let scanned = Scanner::new().scan(&roots).unwrap();
+
+    let one_shot = scan_all_sessions(&roots).unwrap();
+    assert_eq!(scanned.len(), one_shot.len());
+    for (s, o) in scanned.iter().zip(&one_shot) {
+        assert_eq!(s.id, o.id);
+        assert_eq!(s.agent, o.agent);
+        assert_eq!(s.cwd, o.cwd);
+        assert_eq!(s.title, o.title);
+        assert_eq!(s.timestamp, o.timestamp);
+    }
+}
+
+#[test]
+fn rescan_does_not_reparse_unchanged_transcripts() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-myproj",
+        "aaaa1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "original title",
+        "2026-07-01T15:34:02.390Z",
+    );
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    let mut scanner = Scanner::new();
+    scanner.scan(&roots).unwrap();
+
+    // Same length, restored mtime: indistinguishable from unchanged
+    // without reopening the file.
+    let path = claude_root
+        .path()
+        .join("-Users-brian-dev-myproj/aaaa1111-2222-3333-4444-555566667777.jsonl");
+    let swapped = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("original title", "swapped_title!");
+    rewrite_preserving_stat(&path, &swapped);
+
+    let sessions = scanner.scan(&roots).unwrap();
+
+    assert_eq!(
+        sessions[0].title, "original title",
+        "an unchanged (mtime, len) transcript must be served from cache"
+    );
+}
+
+#[test]
+fn rescan_picks_up_modified_transcript() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-myproj",
+        "aaaa1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "original title",
+        "2026-07-01T15:34:02.390Z",
+    );
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    let mut scanner = Scanner::new();
+    let before = scanner.scan(&roots).unwrap();
+
+    // Same length so only the mtime distinguishes it from unchanged.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let path = claude_root
+        .path()
+        .join("-Users-brian-dev-myproj/aaaa1111-2222-3333-4444-555566667777.jsonl");
+    let swapped = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("original title", "modified title");
+    std::fs::write(&path, swapped).unwrap();
+
+    let sessions = scanner.scan(&roots).unwrap();
+
+    assert_eq!(sessions[0].title, "modified title");
+    assert!(
+        sessions[0].timestamp > before[0].timestamp,
+        "timestamp must track the new mtime"
+    );
+}
+
+#[test]
+fn rescan_picks_up_same_mtime_append() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    // A rollout with no user message yet: the agent CLIs append events
+    // over time, and coarse filesystems can leave the mtime unchanged
+    // within the same second.
+    let dir = codex_root.path().join("2026/06/25");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-06-25T22-13-39-019f01b4.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"019f01b4","cwd":"/Users/brian/dev/myproj","thread_source":"user"}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    let mut scanner = Scanner::new();
+    let before = scanner.scan(&roots).unwrap();
+    assert_eq!(before[0].title, "");
+
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut content = std::fs::read_to_string(&path).unwrap();
+    content.push_str(concat!(
+        r#"{"type":"event_msg","payload":{"type":"user_message","message":"appended prompt"}}"#,
+        "\n",
+    ));
+    std::fs::write(&path, content).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+
+    let sessions = scanner.scan(&roots).unwrap();
+
+    assert_eq!(
+        sessions[0].title, "appended prompt",
+        "a same-mtime append must still invalidate the cache (len changed)"
+    );
+}
+
+#[test]
+fn rescan_discovers_new_transcript() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-myproj",
+        "aaaa1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "first session",
+        "2026-07-01T15:34:02.390Z",
+    );
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    let mut scanner = Scanner::new();
+    assert_eq!(scanner.scan(&roots).unwrap().len(), 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write_codex_session(
+        codex_root.path(),
+        "2026/06/25",
+        "019f01b4-47cd-76c0-9d83-9aa151a3a918",
+        "/Users/brian/dev/myproj",
+        "user",
+        "second session",
+    );
+
+    let sessions = scanner.scan(&roots).unwrap();
+
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].title, "second session", "newest first");
+    assert_eq!(sessions[1].title, "first session");
+}
+
+#[test]
+fn rescan_drops_deleted_transcript() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-myproj",
+        "aaaa1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "kept session",
+        "2026-07-01T15:34:02.390Z",
+    );
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-otherproj",
+        "bbbb1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/otherproj",
+        "doomed session",
+        "2026-07-01T15:34:02.390Z",
+    );
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    let mut scanner = Scanner::new();
+    assert_eq!(scanner.scan(&roots).unwrap().len(), 2);
+
+    // The common case is a whole project dir going away (rm -rf).
+    std::fs::remove_dir_all(claude_root.path().join("-Users-brian-dev-otherproj")).unwrap();
+
+    let sessions = scanner.scan(&roots).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "kept session");
+}
+
+#[test]
+fn deleted_transcripts_cache_entry_dies_with_it() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-myproj",
+        "aaaa1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "original title",
+        "2026-07-01T15:34:02.390Z",
+    );
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    let path = claude_root
+        .path()
+        .join("-Users-brian-dev-myproj/aaaa1111-2222-3333-4444-555566667777.jsonl");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut scanner = Scanner::new();
+    scanner.scan(&roots).unwrap();
+
+    // Delete, rescan, then recreate at the same path with the same
+    // (mtime, len) but different content. A cache entry that survived
+    // the deletion would serve the dead file's title.
+    std::fs::remove_file(&path).unwrap();
+    assert!(scanner.scan(&roots).unwrap().is_empty());
+    std::fs::write(&path, content.replace("original title", "reborn__title!")).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+
+    let sessions = scanner.scan(&roots).unwrap();
+
+    assert_eq!(
+        sessions[0].title, "reborn__title!",
+        "a deleted file's cache entry must not outlive it"
+    );
+}
+
+#[test]
+fn rescan_does_not_reparse_rejected_transcripts() {
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    let dir = claude_root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("aaaa1111-2222-3333-4444-555566667777.jsonl");
+    // The sidechain and non-sidechain lines are padded to the same
+    // byte length via the message text.
+    let sidechain = concat!(
+        r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":"a sidechain"},"cwd":"/Users/brian/dev/myproj"}"#,
+        "\n",
+    );
+    let valid = concat!(
+        r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":"a real one"},"cwd":"/Users/brian/dev/myproj"}"#,
+        "\n",
+    );
+    assert_eq!(sidechain.len(), valid.len());
+    std::fs::write(&path, sidechain).unwrap();
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    let mut scanner = Scanner::new();
+    assert!(scanner.scan(&roots).unwrap().is_empty());
+
+    // Same (mtime, len) but now valid content: only a scanner that
+    // cached the rejection can still exclude it without reparsing.
+    rewrite_preserving_stat(&path, valid);
+
+    assert!(
+        scanner.scan(&roots).unwrap().is_empty(),
+        "a parsed-and-rejected file must be cached as rejected, not reparsed"
+    );
+}
+
+#[test]
+fn transiently_unreadable_transcript_is_retried_on_rescan() {
+    use std::os::unix::fs::PermissionsExt;
+    let claude_root = tempfile::tempdir().unwrap();
+    let codex_root = tempfile::tempdir().unwrap();
+    write_claude_session(
+        claude_root.path(),
+        "-Users-brian-dev-myproj",
+        "aaaa1111-2222-3333-4444-555566667777",
+        "/Users/brian/dev/myproj",
+        "hidden then found",
+        "2026-07-01T15:34:02.390Z",
+    );
+    let roots = ScanRoots {
+        claude: claude_root.path().to_path_buf(),
+        codex: codex_root.path().to_path_buf(),
+    };
+    // chmod 000: the file still stats (mtime, len unchanged) but can't
+    // be opened. Caching that failed parse as a rejection would hide
+    // the session forever, because restoring permissions touches
+    // neither mtime nor length.
+    let path = claude_root
+        .path()
+        .join("-Users-brian-dev-myproj/aaaa1111-2222-3333-4444-555566667777.jsonl");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let mut scanner = Scanner::new();
+    assert!(scanner.scan(&roots).unwrap().is_empty());
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let sessions = scanner.scan(&roots).unwrap();
+
+    assert_eq!(sessions.len(), 1, "an I/O failure must be retried, not cached");
+    assert_eq!(sessions[0].title, "hidden then found");
 }
 
 #[test]
