@@ -14,8 +14,11 @@ pub type RunId = u64;
 enum Identity {
     /// A fresh launch. Adoptable only by a transcript outside
     /// `snapshot` — the transcript ids that already existed at launch
-    /// time, which necessarily belong to other sessions.
-    Provisional { run_id: RunId, snapshot: HashSet<String> },
+    /// time, which necessarily belong to other sessions. Once a scan
+    /// observes an ambiguous plausible set, `ambiguous` is set and the
+    /// row can never be adopted: the row lives on until its process
+    /// exits, but attribution has been proven unknowable.
+    Provisional { run_id: RunId, snapshot: HashSet<String>, ambiguous: bool },
     Transcript(String),
 }
 
@@ -37,6 +40,11 @@ struct PendingFork {
     /// the resumed one); they necessarily belong to other sessions.
     snapshot: HashSet<String>,
     since: DateTime<Utc>,
+    /// A scan observed two plausible forks: attribution is permanently
+    /// unknowable, so this wait can never adopt. The process is still
+    /// alive and its fork unattributed, though — it keeps blocking
+    /// sibling adoption in its agent+cwd until it exits.
+    ambiguous: bool,
 }
 
 /// One session in the list: scanned metadata (or launch placeholders)
@@ -98,6 +106,26 @@ impl Row {
     pub fn timestamp(&self) -> DateTime<Utc> {
         self.timestamp
     }
+}
+
+/// The transcripts a waiter could plausibly have written, capped at
+/// two: zero means keep waiting, one is a candidate, two is terminal
+/// ambiguity — attribution is unknowable the moment it is observed,
+/// and later scans add no information.
+fn plausible2<'a>(
+    scanned: &'a [SessionMeta],
+    agent: Agent,
+    cwd: &str,
+    since: DateTime<Utc>,
+    snapshot: &HashSet<String>,
+) -> Vec<&'a SessionMeta> {
+    scanned
+        .iter()
+        .filter(|s| {
+            s.agent == agent && s.cwd == cwd && s.timestamp >= since && !snapshot.contains(&s.id)
+        })
+        .take(2)
+        .collect()
 }
 
 /// Selection is tracked by identity, not index: rescans reorder rows.
@@ -186,7 +214,7 @@ impl Roster {
         self.rows.insert(
             0,
             Row {
-                identity: Identity::Provisional { run_id, snapshot },
+                identity: Identity::Provisional { run_id, snapshot, ambiguous: false },
                 run: None,
                 agent,
                 cwd: cwd.to_string(),
@@ -217,7 +245,7 @@ impl Roster {
                 .iter()
                 .filter_map(|r| r.transcript_id().map(str::to_string))
                 .collect();
-            PendingFork { snapshot, since: Utc::now() }
+            PendingFork { snapshot, since: Utc::now(), ambiguous: false }
         });
         self.rows[self.selected].run = Some(Run { id: run_id, pending_fork });
         Some((run_id, spec))
@@ -275,13 +303,49 @@ impl Roster {
             }
         }
 
+        // Terminal ambiguity is recorded FIRST — before the in-place
+        // clearing below and before adoption, so the outcome never
+        // depends on which scan delivered which half of the evidence.
+        // A waiter that observes two plausible transcripts can never
+        // adopt — not in this scan, not later; mtimes will never say
+        // which file its process wrote. It does NOT stop blocking,
+        // though. Its process is alive and its transcript unattributed,
+        // so any new file in its agent+cwd could still be its late
+        // write; a sibling adopting one would risk a wrong binding. The
+        // block dies with the process (the row drops or loses its run),
+        // which is the safe degraded mode everywhere in this module.
+        for p in &mut provisionals {
+            let (agent, cwd, since) = (p.agent, p.cwd.clone(), p.timestamp);
+            if let Identity::Provisional { snapshot, ambiguous, .. } = &mut p.identity
+                && !*ambiguous
+                && plausible2(&scanned, agent, &cwd, since, snapshot).len() > 1
+            {
+                *ambiguous = true;
+            }
+        }
+        for row in running.values_mut().chain(stragglers.iter_mut()) {
+            let (agent, cwd) = (row.agent, row.cwd.clone());
+            if let Some(run) = &mut row.run
+                && let Some(pending) = &mut run.pending_fork
+                && !pending.ambiguous
+                && plausible2(&scanned, agent, &cwd, pending.since, &pending.snapshot).len() > 1
+            {
+                pending.ambiguous = true;
+            }
+        }
+
         // An append to the resumed transcript itself proves the agent
         // continues in place rather than forking: nothing to wait for,
         // and staying a waiter would block adoption in this cwd forever.
+        // Not once ambiguity is recorded, though (including by this very
+        // scan, above) — fork-like candidates plus an in-place append is
+        // contradictory evidence, and only process exit ends the block
+        // then.
         for row in running.values_mut() {
             let Identity::Transcript(id) = &row.identity else { continue };
             if let Some(run) = &mut row.run
                 && let Some(pending) = &run.pending_fork
+                && !pending.ambiguous
                 && scanned.iter().any(|s| &s.id == id && s.timestamp > pending.since)
             {
                 run.pending_fork = None;
@@ -290,8 +354,9 @@ impl Roster {
 
         // Every process that could plausibly write a new transcript in
         // an agent+cwd competes for it: provisional launches and
-        // pending-fork resumes alike. More than one waiter means a new
-        // transcript can't be attributed, so neither pass may adopt.
+        // pending-fork resumes alike, ambiguous or not. More than one
+        // waiter means a new transcript can't be attributed, so neither
+        // pass may adopt.
         let mut siblings: HashMap<(Agent, String), usize> = HashMap::new();
         let waiting = |row: &Row| row.run.as_ref().is_some_and(|r| r.pending_fork.is_some());
         for row in provisionals
@@ -302,28 +367,20 @@ impl Roster {
             *siblings.entry((row.agent, row.cwd.clone())).or_default() += 1;
         }
         let mut adopted: HashMap<String, Run> = HashMap::new();
-        // The sole transcript a waiting process could have written:
-        // right agent + cwd, written after the wait began, unknown when
-        // the wait began. Uniqueness is judged on that full plausible
-        // set — that a member is already running or claimed doesn't
-        // reveal which file THIS process wrote, so it blocks adoption
-        // rather than shrinking the set toward a guess.
-        let unique_candidate = |adopted: &HashMap<String, Run>,
-                                agent: Agent,
-                                cwd: &str,
-                                since: DateTime<Utc>,
-                                snapshot: &HashSet<String>| {
-            let mut plausible = scanned.iter().filter(|s| {
-                s.agent == agent
-                    && s.cwd == cwd
-                    && s.timestamp >= since
-                    && !snapshot.contains(&s.id)
-            });
-            let candidate = plausible.next()?;
-            if plausible.next().is_some()
-                || running.contains_key(&candidate.id)
-                || adopted.contains_key(&candidate.id)
-            {
+        // The one transcript a waiting process could have written. A
+        // member that is already running or claimed doesn't reveal
+        // which file THIS process wrote, so it blocks adoption rather
+        // than shrinking the set toward a guess. (Ambiguous sets were
+        // already retired above and cannot reach here.)
+        let sole_candidate = |adopted: &HashMap<String, Run>,
+                              agent: Agent,
+                              cwd: &str,
+                              since: DateTime<Utc>,
+                              snapshot: &HashSet<String>| {
+            let [candidate] = plausible2(&scanned, agent, cwd, since, snapshot)[..] else {
+                return None;
+            };
+            if running.contains_key(&candidate.id) || adopted.contains_key(&candidate.id) {
                 return None;
             }
             Some(candidate.id.clone())
@@ -332,11 +389,10 @@ impl Roster {
             if siblings[&(p.agent, p.cwd.clone())] > 1 {
                 return true;
             }
-            let Identity::Provisional { run_id, snapshot } = &p.identity else {
+            let Identity::Provisional { run_id, snapshot, ambiguous: false } = &p.identity else {
                 return true;
             };
-            let Some(candidate) =
-                unique_candidate(&adopted, p.agent, &p.cwd, p.timestamp, snapshot)
+            let Some(candidate) = sole_candidate(&adopted, p.agent, &p.cwd, p.timestamp, snapshot)
             else {
                 return true;
             };
@@ -357,10 +413,10 @@ impl Roster {
             .chain(stragglers.iter())
             .filter_map(|row| {
                 let pending = row.run.as_ref()?.pending_fork.as_ref()?;
-                if siblings[&(row.agent, row.cwd.clone())] > 1 {
+                if pending.ambiguous || siblings[&(row.agent, row.cwd.clone())] > 1 {
                     return None;
                 }
-                let candidate = unique_candidate(
+                let candidate = sole_candidate(
                     &adopted,
                     row.agent,
                     &row.cwd,
