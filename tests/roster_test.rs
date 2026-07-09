@@ -605,6 +605,30 @@ fn an_origin_append_does_not_lift_an_ambiguous_fork_block() {
 }
 
 #[test]
+fn a_same_scan_origin_append_does_not_outrun_an_ambiguity_observation() {
+    // The contradiction (in-place bump + two plausible forks) can
+    // arrive in a single scan. The outcome must not depend on arrival
+    // order: the ambiguity observation wins and the row keeps blocking
+    // its cwd, exactly as if the evidence had come one scan apart.
+    let a = meta("a", "/p");
+    let mut roster = Roster::new(vec![a.clone()]);
+    roster.resume_selected().unwrap();
+    let (d, e) = (post_launch(meta("d", "/p")), post_launch(meta("e", "/p")));
+
+    roster.absorb_scan(vec![post_launch(meta("a", "/p")), d.clone(), e.clone()]);
+
+    roster.launch(Agent::Claude, "/p");
+    roster.absorb_scan(vec![
+        post_launch(meta("fresh", "/p")),
+        post_launch(meta("a", "/p")),
+        d,
+        e,
+    ]);
+    let fresh = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh.run_id(), None, "the ambiguous contender still blocks");
+}
+
+#[test]
 fn a_fork_scanned_after_exit_is_a_plain_idle_row() {
     // The process died before its fork hit a scan: nothing to adopt.
     let mut roster = Roster::new(vec![meta("orig", "/p")]);

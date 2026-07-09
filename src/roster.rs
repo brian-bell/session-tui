@@ -303,32 +303,17 @@ impl Roster {
             }
         }
 
-        // An append to the resumed transcript itself proves the agent
-        // continues in place rather than forking: nothing to wait for,
-        // and staying a waiter would block adoption in this cwd forever.
-        // Not once ambiguity is recorded, though — fork-like candidates
-        // plus an in-place append is contradictory evidence, and only
-        // process exit ends the block then.
-        for row in running.values_mut() {
-            let Identity::Transcript(id) = &row.identity else { continue };
-            if let Some(run) = &mut row.run
-                && let Some(pending) = &run.pending_fork
-                && !pending.ambiguous
-                && scanned.iter().any(|s| &s.id == id && s.timestamp > pending.since)
-            {
-                run.pending_fork = None;
-            }
-        }
-
-        // Terminal ambiguity is recorded BEFORE adoption: a waiter that
-        // observes two plausible transcripts can never adopt — not in
-        // this scan, not later; mtimes will never say which file its
-        // process wrote. It does NOT stop blocking, though. Its process
-        // is alive and its transcript unattributed, so any new file in
-        // its agent+cwd could still be its late write; a sibling
-        // adopting one would risk a wrong binding. The block dies with
-        // the process (the row drops or loses its run), which is the
-        // safe degraded mode everywhere in this module.
+        // Terminal ambiguity is recorded FIRST — before the in-place
+        // clearing below and before adoption, so the outcome never
+        // depends on which scan delivered which half of the evidence.
+        // A waiter that observes two plausible transcripts can never
+        // adopt — not in this scan, not later; mtimes will never say
+        // which file its process wrote. It does NOT stop blocking,
+        // though. Its process is alive and its transcript unattributed,
+        // so any new file in its agent+cwd could still be its late
+        // write; a sibling adopting one would risk a wrong binding. The
+        // block dies with the process (the row drops or loses its run),
+        // which is the safe degraded mode everywhere in this module.
         for p in &mut provisionals {
             let (agent, cwd, since) = (p.agent, p.cwd.clone(), p.timestamp);
             if let Identity::Provisional { snapshot, ambiguous, .. } = &mut p.identity
@@ -346,6 +331,24 @@ impl Roster {
                 && plausible2(&scanned, agent, &cwd, pending.since, &pending.snapshot).len() > 1
             {
                 pending.ambiguous = true;
+            }
+        }
+
+        // An append to the resumed transcript itself proves the agent
+        // continues in place rather than forking: nothing to wait for,
+        // and staying a waiter would block adoption in this cwd forever.
+        // Not once ambiguity is recorded, though (including by this very
+        // scan, above) — fork-like candidates plus an in-place append is
+        // contradictory evidence, and only process exit ends the block
+        // then.
+        for row in running.values_mut() {
+            let Identity::Transcript(id) = &row.identity else { continue };
+            if let Some(run) = &mut row.run
+                && let Some(pending) = &run.pending_fork
+                && !pending.ambiguous
+                && scanned.iter().any(|s| &s.id == id && s.timestamp > pending.since)
+            {
+                run.pending_fork = None;
             }
         }
 
