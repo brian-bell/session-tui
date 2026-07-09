@@ -176,6 +176,94 @@ fn adoption_holds_off_with_two_candidate_transcripts() {
 }
 
 #[test]
+fn a_transiently_missing_candidate_does_not_resolve_a_launch_ambiguity() {
+    // Same terminal-ambiguity rule as fork adoption: two plausible
+    // transcripts for one launch can never be told apart later, even
+    // if a rescan transiently loses one of them.
+    let mut roster = Roster::new(Vec::new());
+    let (run_id, _) = roster.launch(Agent::Claude, "/p");
+    let (c1, c2) = (post_launch(meta("c1", "/p")), post_launch(meta("c2", "/p")));
+    roster.absorb_scan(vec![c1, c2.clone()]); // ambiguous
+
+    roster.absorb_scan(vec![c2]); // c1 transiently gone
+
+    assert_eq!(roster.rows().iter().filter(|r| r.is_provisional()).count(), 1);
+    assert!(roster.is_running(run_id), "the run stays on the placeholder");
+    let c2_row = roster.rows().iter().find(|r| r.transcript_id() == Some("c2")).unwrap();
+    assert_eq!(c2_row.run_id(), None);
+}
+
+#[test]
+fn an_ambiguous_launch_never_adopts_even_a_later_unique_transcript() {
+    // Once ambiguity was observed, the launch's real transcript is
+    // among the candidates already seen — a transcript first appearing
+    // later necessarily belongs to someone else, however unique it
+    // looks. (Excluding the old candidates and adopting the newcomer
+    // would bind the run to a file this process cannot have written.)
+    let mut roster = Roster::new(Vec::new());
+    let (run_id, _) = roster.launch(Agent::Claude, "/p");
+    let (c1, c2) = (post_launch(meta("c1", "/p")), post_launch(meta("c2", "/p")));
+    roster.absorb_scan(vec![c1, c2]); // ambiguous
+
+    roster.absorb_scan(vec![post_launch(meta("c3", "/p"))]);
+
+    assert_eq!(roster.rows().iter().filter(|r| r.is_provisional()).count(), 1);
+    assert!(roster.is_running(run_id));
+    let c3 = roster.rows().iter().find(|r| r.transcript_id() == Some("c3")).unwrap();
+    assert_eq!(c3.run_id(), None);
+}
+
+#[test]
+fn an_ambiguous_launch_blocks_later_launches_until_its_process_exits() {
+    // An ambiguous launch can never adopt, but while its process lives
+    // any new transcript in the cwd could still be its late write — a
+    // later launch adopting one would risk a wrong binding. The block
+    // lifts when the contender exits.
+    let mut roster = Roster::new(Vec::new());
+    let (run_a, _) = roster.launch(Agent::Claude, "/p");
+    let (c1, c2) = (post_launch(meta("c1", "/p")), post_launch(meta("c2", "/p")));
+    roster.absorb_scan(vec![c1.clone(), c2.clone()]); // first launch goes ambiguous
+
+    let (run_b, _) = roster.launch(Agent::Claude, "/p");
+    let fresh = post_launch(meta("fresh", "/p"));
+    roster.absorb_scan(vec![fresh.clone(), c1.clone(), c2.clone()]);
+    let fresh_row = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh_row.run_id(), None, "fresh could be the contender's late write");
+
+    roster.mark_exited(run_a);
+    roster.absorb_scan(vec![fresh, c1, c2]);
+    let fresh_row = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh_row.run_id(), Some(run_b));
+}
+
+#[test]
+fn an_ambiguous_launch_blocks_its_sibling_until_its_process_exits() {
+    // Launch A, a stray transcript lands between A and B, launch B:
+    // one scan then makes A terminally ambiguous while B's fresh
+    // transcript looks unique. But "fresh" is in A's plausible set too
+    // — if A wrote it, adopting it for B is a wrong binding. A's live
+    // process contaminates the cwd; B adopts only once A is gone.
+    let mut roster = Roster::new(Vec::new());
+    let (run_a, _) = roster.launch(Agent::Claude, "/p");
+    let mut stray = meta("stray", "/p");
+    stray.timestamp = roster.rows()[0].timestamp() + Duration::nanoseconds(1);
+    let (run_b, _) = roster.launch(Agent::Claude, "/p");
+    let fresh = post_launch(meta("fresh", "/p"));
+
+    roster.absorb_scan(vec![fresh.clone(), stray.clone()]);
+    assert_eq!(
+        roster.rows().iter().filter(|r| r.is_provisional()).count(),
+        2,
+        "B must not adopt a transcript A might have written"
+    );
+
+    roster.mark_exited(run_a);
+    roster.absorb_scan(vec![fresh, stray]);
+    let fresh_row = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh_row.run_id(), Some(run_b), "the known contender is gone; B adopts");
+}
+
+#[test]
 fn mark_exited_drops_the_provisional_row_and_selection_follows_identity() {
     let mut roster = Roster::new(vec![meta("a", "/p"), meta("b", "/q")]);
     let (run_id, _) = roster.launch(Agent::Claude, "/p"); // on top, selected
@@ -429,6 +517,91 @@ fn a_fork_is_adopted_even_when_the_origin_vanishes_from_the_scan() {
         "a runless row missing from the scan has nothing to show"
     );
     assert_eq!(roster.selected_row().unwrap().transcript_id(), Some("fork"));
+}
+
+#[test]
+fn a_transiently_missing_candidate_does_not_resolve_a_fork_ambiguity() {
+    // One scan saw two plausible forks: attribution is unknowable, and
+    // no later scan can change that. A rescan that transiently loses
+    // one candidate (parse failure, deletion) must not make the other
+    // look uniquely attributable.
+    let a = meta("a", "/p");
+    let mut roster = Roster::new(vec![a.clone()]);
+    let (run_a, _) = roster.resume_selected().unwrap();
+    let (d, e) = (post_launch(meta("d", "/p")), post_launch(meta("e", "/p")));
+    roster.absorb_scan(vec![d, e.clone(), a.clone()]); // ambiguous
+
+    roster.absorb_scan(vec![e.clone(), a.clone()]); // d transiently gone
+
+    let by_id = |id: &str| roster.rows().iter().find(|r| r.transcript_id() == Some(id)).unwrap();
+    assert_eq!(by_id("a").run_id(), Some(run_a), "the run stays home");
+    assert_eq!(by_id("e").run_id(), None);
+}
+
+#[test]
+fn a_reappearing_candidate_does_not_revive_an_ambiguous_fork_wait() {
+    let a = meta("a", "/p");
+    let mut roster = Roster::new(vec![a.clone()]);
+    let (run_a, _) = roster.resume_selected().unwrap();
+    let (d, e) = (post_launch(meta("d", "/p")), post_launch(meta("e", "/p")));
+    roster.absorb_scan(vec![d.clone(), e.clone(), a.clone()]); // ambiguous: wait retired
+    roster.absorb_scan(vec![e.clone(), a.clone()]); // d transiently gone
+
+    roster.absorb_scan(vec![d, e, a]); // d is back
+
+    let by_id = |id: &str| roster.rows().iter().find(|r| r.transcript_id() == Some(id)).unwrap();
+    assert_eq!(by_id("a").run_id(), Some(run_a));
+    assert_eq!(by_id("d").run_id(), None);
+    assert_eq!(by_id("e").run_id(), None);
+}
+
+#[test]
+fn an_ambiguous_fork_wait_blocks_launches_until_its_process_exits() {
+    // An ambiguous fork wait can never adopt, but the resumed process
+    // is alive and its fork is unattributed — a new transcript in the
+    // cwd could still be its late write, so launches here stay blocked
+    // until the contender exits.
+    let a = meta("a", "/p");
+    let mut roster = Roster::new(vec![a.clone()]);
+    let (run_a, _) = roster.resume_selected().unwrap();
+    let (d, e) = (post_launch(meta("d", "/p")), post_launch(meta("e", "/p")));
+    roster.absorb_scan(vec![d.clone(), e.clone(), a.clone()]); // ambiguous: wait retired
+
+    let (launch_run, _) = roster.launch(Agent::Claude, "/p");
+    let fresh = post_launch(meta("fresh", "/p"));
+    roster.absorb_scan(vec![fresh.clone(), d.clone(), e.clone(), a.clone()]);
+    let fresh_row = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh_row.run_id(), None, "fresh could be the contender's late fork");
+
+    roster.mark_exited(run_a);
+    roster.absorb_scan(vec![fresh, d, e, a]);
+    let fresh_row = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh_row.run_id(), Some(launch_run));
+}
+
+#[test]
+fn an_origin_append_does_not_lift_an_ambiguous_fork_block() {
+    // Fork-like candidates followed by an in-place append is
+    // contradictory evidence about the agent; contradiction is still
+    // uncertainty. Once ambiguity is recorded, only process exit ends
+    // the block.
+    let a = meta("a", "/p");
+    let mut roster = Roster::new(vec![a.clone()]);
+    roster.resume_selected().unwrap();
+    let (d, e) = (post_launch(meta("d", "/p")), post_launch(meta("e", "/p")));
+    roster.absorb_scan(vec![d.clone(), e.clone(), a.clone()]); // ambiguous: wait retired
+
+    roster.absorb_scan(vec![post_launch(meta("a", "/p")), d.clone(), e.clone()]); // origin bumped
+
+    roster.launch(Agent::Claude, "/p");
+    roster.absorb_scan(vec![
+        post_launch(meta("fresh", "/p")),
+        post_launch(meta("a", "/p")),
+        d,
+        e,
+    ]);
+    let fresh = roster.rows().iter().find(|r| r.transcript_id() == Some("fresh")).unwrap();
+    assert_eq!(fresh.run_id(), None, "the ambiguous contender still blocks");
 }
 
 #[test]

@@ -112,7 +112,14 @@ fixtures in `tests/fixtures/mod.rs`.
   place and never carries one. No candidate means the row keeps its
   run, and an append to the resumed transcript itself clears the
   pending fork so the row stops competing with launches in its cwd.
-  Domain terms in `CONTEXT.md`.
+  Observed ambiguity is terminal: a scan with two plausible candidates
+  means the waiter (pending fork or provisional) can never adopt —
+  later scans carry no information mtimes didn't carry then, so
+  shrinking the set again would be a guess. The waiter keeps blocking
+  sibling adoption in its agent+cwd while its process lives, though:
+  any new transcript there could still be its late write, and a wrong
+  binding is worse than a stranded placeholder. The block dies with
+  the process. Domain terms in `CONTEXT.md`.
 - **cwd handling**: picker cwds are canonicalized (transcripts record
   the child's resolved getcwd — `/tmp` is a symlink on macOS). Missing
   cwds are refused on both launch and resume because portable-pty
