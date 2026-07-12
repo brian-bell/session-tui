@@ -1,8 +1,12 @@
 # session-tui — agent context
 
 A Rust TUI that lists Claude Code and Codex sessions in a left pane and
-runs them in embedded terminals in a right pane (25/75 split). Multiple
-sessions run concurrently; selection swaps which live terminal is shown.
+runs them in embedded terminals in a right pane. Multiple sessions run
+concurrently; selection swaps which live terminal is shown. The split
+follows what the user is doing: 80/20 while browsing (no terminal
+attached), 25/75 once one is attached, and by default the list
+auto-hides entirely while the terminal has focus; `h` in list focus
+toggles auto-hide.
 
 > **Note:** this repo maintains `CLAUDE.md` and `AGENTS.md` as separate
 > files (not a symlink) to support Beads integration — `bd` manages
@@ -29,7 +33,8 @@ require a Unix host (CI uses ubuntu-latest).
 `scripts/e2e.py` (Python 3 stdlib, unix only) is the end-to-end check:
 it runs the release binary in a real PTY with a hermetic `$HOME` (fixture
 transcript) and a fake `claude` shim on `PATH`, then drives
-list → picker → launch → input passthrough → focus toggle → kill → quit,
+list → picker → launch → input passthrough → auto-hide resize → focus
+toggle → auto-hide toggle → kill → quit,
 asserting on rendered frames. It covers what unit tests can't — crossterm
 key encoding quirks, PTY lifecycle, real rendering — and its assertions
 are whitespace-insensitive because ratatui's frame diffing draws blank
@@ -80,15 +85,18 @@ One binary crate plus a library, `src/`:
 - `app.rs` — pure Elm-style state machine. `handle_key`/`handle_paste`
   return `Effect`s (`Spawn`, `WriteTerminal`, `Kill`, `Quit`); it never
   touches a PTY. Owns focus (List/Terminal), overlays (confirm
-  quit/kill, launch picker), scrollback offset, notices, and the
-  attached run; delegates session-list state to `roster.rs`, input
+  quit/kill, launch picker), scrollback offset, notices, the auto-hide
+  flag (`list_hidden` is derived from it and focus, never stored), and
+  the attached run; delegates session-list state to `roster.rs`, input
   encoding to `input.rs`, and picker state to `picker.rs`. `handle_key`/`handle_paste` take the child's
   `TermModes` as a parameter — App holds no synced mode state.
-- `ui.rs` — ratatui rendering: 25/75 layout, session rows, tui-term
-  pane, overlays, help/notice bar. `panes` computes the frame geometry
-  once; `render` and `terminal_pane_size` (the single source of PTY
-  dimensions) both consume it, so the drawn pane and the PTY size
-  cannot disagree.
+- `ui.rs` — ratatui rendering: session rows, tui-term pane, overlays,
+  help/notice bar. Three layouts — 80/20 with nothing attached, 25/75
+  with a terminal attached, terminal-only when auto-hide hides the
+  list. `panes` computes the frame geometry once from the frame size
+  and app state; `render` and `terminal_pane_size` (the single source
+  of PTY dimensions) both consume it, so the drawn pane and the PTY
+  size cannot disagree.
 - `main.rs` — composition root: crossterm event loop, effect execution,
   child reaping, notify-based store watcher (500ms debounce), and
   `TerminalGuard` (restores the terminal on every exit path).
@@ -149,6 +157,11 @@ fixtures in `tests/fixtures/mod.rs`.
   addition to parse-time title stripping. Keep that invariant for any
   new rendering of transcript data.
 - **y/N dialogs**: only `y`/`Y` confirms; Enter cancels.
+- **PTY sizing**: pane geometry depends on the frame size *and* app
+  state (auto-hide, whether a terminal is attached). The main loop
+  reconciles every PTY against `terminal_pane_size(area, &app)` before
+  each draw — that reconciliation is the only place PTYs are resized
+  after spawn.
 
 ## Conventions
 
@@ -159,7 +172,8 @@ fixtures in `tests/fixtures/mod.rs`.
 
 ## Known limitations / v2 backlog
 
-Fuzzy list filter, TOML config (keybinds, scan roots, scrollback size),
+Fuzzy list filter, TOML config (keybinds, scan roots, scrollback size,
+auto-hide persistence),
 copy mode with clipboard, full path browser in the picker, detach
 daemon (sessions currently die with the app — transcripts keep them
 resumable), mouse support.

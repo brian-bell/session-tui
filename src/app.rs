@@ -42,6 +42,7 @@ pub struct App {
     pub notice: Option<String>,
     roster: Roster,
     attached: Option<RunId>,
+    auto_hide: bool,
 }
 
 impl App {
@@ -53,7 +54,14 @@ impl App {
             notice: None,
             roster: Roster::new(sessions),
             attached: None,
+            auto_hide: true,
         }
+    }
+
+    /// Whether the session list pane is hidden. Derived, never stored:
+    /// visibility can't drift when attach/mark_exited flip focus.
+    pub fn list_hidden(&self) -> bool {
+        self.auto_hide && self.focus == Focus::Terminal
     }
 
     pub fn roster(&self) -> &Roster {
@@ -232,6 +240,12 @@ impl App {
                 } else {
                     vec![Effect::Quit]
                 }
+            }
+            KeyCode::Char('h') => {
+                self.auto_hide = !self.auto_hide;
+                self.notice =
+                    Some(if self.auto_hide { "auto-hide on" } else { "auto-hide off" }.into());
+                Vec::new()
             }
             KeyCode::Char('n') => {
                 self.overlay = Overlay::LaunchPicker(PickerState::new(self.roster.known_dirs()));

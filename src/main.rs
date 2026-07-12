@@ -63,6 +63,7 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut app = App::new(Vec::new());
     let mut ptys: HashMap<RunId, PtySession> = HashMap::new();
+    let mut last_pane: Option<(u16, u16)> = None;
 
     loop {
         // Reap children that exited so the UI stops showing them live.
@@ -73,6 +74,22 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
         for run_id in exited {
             ptys.remove(&run_id);
             app.mark_exited(run_id);
+        }
+
+        // Pane geometry depends on the frame size and app state (list
+        // visibility, whether a terminal is attached); reconcile every
+        // PTY against it before each draw so the drawn pane and the
+        // child's size can't disagree. This is the only place PTYs are
+        // resized after spawn.
+        let size = terminal.size()?;
+        let pane =
+            ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), &app);
+        if last_pane != Some(pane) {
+            let (rows, cols) = pane;
+            for pty in ptys.values_mut() {
+                let _ = pty.resize(rows.max(2), cols.max(2));
+            }
+            last_pane = Some(pane);
         }
 
         if let Some(pty) = app.attached_run().and_then(|id| ptys.get(&id)) {
@@ -99,13 +116,8 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
                     let modes = attached_modes(&app, &ptys);
                     app.handle_paste(&text, modes)
                 }
-                Event::Input(CtEvent::Resize(w, h)) => {
-                    let (rows, cols) = ui::terminal_pane_size(Rect::new(0, 0, w, h));
-                    for pty in ptys.values_mut() {
-                        let _ = pty.resize(rows.max(2), cols.max(2));
-                    }
-                    Vec::new()
-                }
+                // Resize just wakes the loop; the pre-draw reconciliation
+                // picks up the new frame size.
                 Event::Input(_) => Vec::new(),
                 Event::Scanned(sessions) => {
                     app.update_sessions(sessions);
@@ -141,7 +153,7 @@ fn execute(
         Effect::Spawn { run_id, spec } => {
             let size = terminal.size()?;
             let (rows, cols) =
-                ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height));
+                ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), app);
             match PtySession::spawn(&spec, rows.max(2), cols.max(2)) {
                 Ok(pty) => {
                     ptys.insert(run_id, pty);
