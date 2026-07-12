@@ -4,6 +4,12 @@ A Rust TUI that lists Claude Code and Codex sessions in a left pane and
 runs them in embedded terminals in a right pane (25/75 split). Multiple
 sessions run concurrently; selection swaps which live terminal is shown.
 
+> **Note:** this repo maintains `CLAUDE.md` and `AGENTS.md` as separate
+> files (not a symlink) to support Beads integration — `bd` manages
+> tool-specific blocks in each file independently. Shared project
+> context lives here in `AGENTS.md`; `CLAUDE.md` refers back to this
+> file.
+
 ## Build, test, run
 
 ```sh
