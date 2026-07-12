@@ -8,3 +8,6 @@
 
 # Beads local activity log (machine-local churn; issue sync uses refs/dolt/data)
 .beads/interactions.jsonl
+
+# Beads passive JSONL export (issue sync uses refs/dolt/data)
+.beads/issues.jsonl
