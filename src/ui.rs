@@ -70,12 +70,15 @@ pub fn render(
 /// The inner size of the terminal pane for a given frame size; PTYs are
 /// kept at exactly this size. The interior is derived from a `Block`
 /// with the same borders `render_terminal` draws, so the border math
-/// can't drift either.
-pub fn terminal_pane_size(frame: Rect, app: &App) -> (u16, u16) {
+/// can't drift either. None while browsing: with nothing attached the
+/// right pane is a placeholder hint, not a terminal, and sizing live
+/// detached PTYs to it would rewrap their output.
+pub fn terminal_pane_size(frame: Rect, app: &App) -> Option<(u16, u16)> {
+    app.attached_run()?;
     let inner = Block::default()
         .borders(Borders::ALL)
         .inner(panes(frame, app).terminal);
-    (inner.height, inner.width)
+    Some((inner.height, inner.width))
 }
 
 fn render_list(f: &mut Frame, app: &App, statuses: &HashMap<RunId, SessionStatus>, area: Rect) {

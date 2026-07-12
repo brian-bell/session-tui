@@ -135,7 +135,12 @@ fn reconcile_ptys(
     last_pane: &mut Option<(u16, u16)>,
 ) -> Result<()> {
     let size = terminal.size()?;
-    let pane = ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), app);
+    // None while browsing: detached PTYs keep their last displayed size
+    // rather than shrinking to the placeholder pane.
+    let Some(pane) = ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), app)
+    else {
+        return Ok(());
+    };
     if *last_pane != Some(pane) {
         let (rows, cols) = pane;
         for pty in ptys.values_mut() {
@@ -165,8 +170,11 @@ fn execute(
     match effect {
         Effect::Spawn { run_id, spec } => {
             let size = terminal.size()?;
+            // App attaches before emitting Spawn, so a pane size always
+            // exists here; the fallback is defensive.
             let (rows, cols) =
-                ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), app);
+                ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), app)
+                    .unwrap_or((24, 80));
             match PtySession::spawn(&spec, rows.max(2), cols.max(2)) {
                 Ok(pty) => {
                     ptys.insert(run_id, pty);

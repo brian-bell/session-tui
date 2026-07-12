@@ -160,8 +160,11 @@ fixtures in `tests/fixtures/mod.rs`.
 - **PTY sizing**: pane geometry depends on the frame size *and* app
   state (auto-hide, whether a terminal is attached). The main loop
   reconciles every PTY against `terminal_pane_size(area, &app)` before
-  each draw — that reconciliation is the only place PTYs are resized
-  after spawn.
+  each draw and after each state-changing event — that reconciliation
+  is the only place PTYs are resized after spawn.
+  `terminal_pane_size` is `None` while browsing (nothing attached):
+  the right pane is a placeholder, not a terminal, so detached live
+  PTYs keep their last displayed size instead of shrinking to it.
 
 ## Conventions
 

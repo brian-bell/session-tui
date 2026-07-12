@@ -123,17 +123,39 @@ fn hidden_list_gives_the_terminal_the_full_width() {
 }
 
 #[test]
+fn no_pty_size_is_reported_while_browsing() {
+    // With nothing attached the right pane is a placeholder hint, not
+    // a terminal: reporting its size would shrink every detached live
+    // PTY to the 20% placeholder and rewrap background output. Browse
+    // mode must report no size so PTYs keep their last displayed one.
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut resumable = meta("s1", Agent::Claude, "one");
+    resumable.cwd = "/tmp".into();
+    let mut app = App::new(vec![resumable]);
+    let frame = ratatui::layout::Rect::new(0, 0, 100, 30);
+
+    assert_eq!(ui::terminal_pane_size(frame, &app), None, "browsing: no PTY is displayed");
+
+    app.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        session_tui::term::TermModes::default(),
+    ); // attach
+    assert!(ui::terminal_pane_size(frame, &app).is_some(), "attached: PTYs track the pane");
+}
+
+#[test]
 fn drawn_terminal_pane_and_pty_size_agree() {
     // The invariant behind "terminal_pane_size is the single source of
     // PTY dimensions": the size handed to the PTY must equal the inner
     // size of the pane render() actually draws, or the child renders
     // at one size into a pane of another. Expectations are read from
     // the rendered buffer so this pins agreement, not a copy of the
-    // layout math. Geometry has three states — expanded list (nothing
-    // attached), 25/75 split (attached, auto-hide off), terminal-only
-    // (attached, auto-hide on) — and every one must agree.
+    // layout math. Only attached geometries size PTYs — 25/75 split
+    // (auto-hide off) and terminal-only (auto-hide on) — and both must
+    // agree; browse mode reports no size (see
+    // no_pty_size_is_reported_while_browsing).
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    for layout in ["expanded", "split", "hidden"] {
+    for layout in ["split", "hidden"] {
         for (w, h) in [(100u16, 30u16), (81, 24), (33, 9)] {
             let mut resumable = meta("s1", Agent::Claude, "one");
             resumable.cwd = "/tmp".into();
@@ -145,7 +167,6 @@ fn drawn_terminal_pane_and_pty_size_agree() {
                 );
             };
             match layout {
-                "expanded" => {}
                 "split" => {
                     press(&mut app, KeyCode::Char('h')); // auto-hide off
                     press(&mut app, KeyCode::Enter); // attach
@@ -178,7 +199,8 @@ fn drawn_terminal_pane_and_pty_size_agree() {
             let drawn_outer_h = h - 1; // help bar takes the last row
 
             let (rows, cols) =
-                ui::terminal_pane_size(ratatui::layout::Rect::new(0, 0, w, h), &app);
+                ui::terminal_pane_size(ratatui::layout::Rect::new(0, 0, w, h), &app)
+                    .expect("a terminal is attached");
             assert_eq!(
                 (rows, cols),
                 (drawn_outer_h - 2, drawn_outer_w - 2),
