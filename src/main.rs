@@ -76,21 +76,7 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
             app.mark_exited(run_id);
         }
 
-        // Pane geometry depends on the frame size and app state (list
-        // visibility, whether a terminal is attached); reconcile every
-        // PTY against it before each draw so the drawn pane and the
-        // child's size can't disagree. This is the only place PTYs are
-        // resized after spawn.
-        let size = terminal.size()?;
-        let pane =
-            ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), &app);
-        if last_pane != Some(pane) {
-            let (rows, cols) = pane;
-            for pty in ptys.values_mut() {
-                let _ = pty.resize(rows.max(2), cols.max(2));
-            }
-            last_pane = Some(pane);
-        }
+        reconcile_ptys(&terminal, &app, &mut ptys, &mut last_pane)?;
 
         if let Some(pty) = app.attached_run().and_then(|id| ptys.get(&id)) {
             pty.set_scrollback(app.scroll_offset);
@@ -116,14 +102,18 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
                     let modes = attached_modes(&app, &ptys);
                     app.handle_paste(&text, modes)
                 }
-                // Resize just wakes the loop; the pre-draw reconciliation
-                // picks up the new frame size.
+                // Resize just wakes the loop; reconcile_ptys below picks
+                // up the new frame size before any input forwards.
                 Event::Input(_) => Vec::new(),
                 Event::Scanned(sessions) => {
                     app.update_sessions(sessions);
                     Vec::new()
                 }
             };
+            // A key/paste can change focus or auto-hide, which changes
+            // pane geometry; reconcile before forwarding input from this
+            // same drained batch so it never reaches a stale-sized PTY.
+            reconcile_ptys(&terminal, &app, &mut ptys, &mut last_pane)?;
             for effect in effects {
                 if !execute(effect, &mut app, &mut ptys, &terminal)? {
                     return Ok(());
@@ -131,6 +121,29 @@ fn run(rx: mpsc::Receiver<Event>) -> Result<()> {
             }
         }
     }
+}
+
+/// Pane geometry depends on the frame size and app state (list
+/// visibility, whether a terminal is attached); reconcile every PTY
+/// against it so the drawn pane and the child's size can't disagree,
+/// and so no queued input forwards to a stale-sized PTY. This is the
+/// only place PTYs are resized after spawn.
+fn reconcile_ptys(
+    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
+    app: &App,
+    ptys: &mut HashMap<RunId, PtySession>,
+    last_pane: &mut Option<(u16, u16)>,
+) -> Result<()> {
+    let size = terminal.size()?;
+    let pane = ui::terminal_pane_size(Rect::new(0, 0, size.width, size.height), app);
+    if *last_pane != Some(pane) {
+        let (rows, cols) = pane;
+        for pty in ptys.values_mut() {
+            let _ = pty.resize(rows.max(2), cols.max(2));
+        }
+        *last_pane = Some(pane);
+    }
+    Ok(())
 }
 
 /// The attached child's DEC modes, sampled at event time so a key or
