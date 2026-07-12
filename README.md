@@ -3,7 +3,10 @@
 A terminal multiplexer for coding-agent sessions. The left pane lists
 your Claude Code and Codex sessions (newest first); the right pane is an
 embedded terminal where sessions run. Multiple sessions can run at once —
-switching selection swaps which live terminal is shown.
+switching selection swaps which live terminal is shown. The layout
+follows what you're doing: the list gets 80% of the frame while you
+browse, shrinks to 25% once a terminal is attached, and by default hides
+entirely while the terminal has focus (`h` toggles that).
 
 ```
 ┌ Sessions ─────────┐┌ Terminal ──────────────────────────────────┐
@@ -39,9 +42,10 @@ start outside the app appear automatically.
 | `j`/`k`/arrows | list | move selection |
 | `Enter` | list | resume selected session (or attach if running) |
 | `n` | list | new session: `Tab` picks agent, arrows pick a known project dir, or type/paste a path |
+| `h` | list | toggle auto-hide (on by default: the list hides while the terminal has focus) |
 | `Ctrl+K` | list | kill the selected running session (`y` confirms) |
 | `q` | list | quit (`y` confirms if sessions are running) |
-| `Ctrl+\` | anywhere | toggle focus between list and terminal |
+| `Ctrl+\` | anywhere | toggle focus between list and terminal (with auto-hide, this also shows/hides the list) |
 | `PgUp`/`PgDn` | terminal | browse scrollback; any other key snaps back live |
 
 In terminal focus every other key — including `Esc`, `Ctrl+C`,

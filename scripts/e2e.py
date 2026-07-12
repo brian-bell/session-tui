@@ -3,7 +3,8 @@
 
 Spawns the release binary in a real PTY with a fake `claude` on PATH and a
 hermetic $HOME (fixture transcript, empty codex store), then drives
-list -> picker -> launch -> input passthrough -> focus toggle -> kill -> quit
+list -> picker -> launch -> input passthrough -> auto-hide resize ->
+focus toggle -> auto-hide toggle -> kill -> quit
 and asserts on the rendered frames.
 
 This exercises the layers unit tests can't reach — real key encoding through
@@ -121,13 +122,16 @@ def write_fixture_transcript(home: Path, cwd: Path) -> None:
 
 
 def write_claude_shim(shim_dir: Path) -> None:
-    """Fake `claude`: announces its cwd, then echoes stdin line by line."""
+    """Fake `claude`: announces its cwd, then echoes stdin line by line.
+    `size` reports the PTY dimensions the child actually has — the only
+    ground truth for auto-hide resizing frames can't show."""
     fake = shim_dir / "claude"
     fake.write_text(
         '#!/bin/sh\n'
         'echo "FAKE-CLAUDE started in $(pwd) args:$*"\n'
         'while IFS= read -r line; do\n'
         '  echo "echo:$line"\n'
+        '  [ "$line" = "size" ] && echo "SIZE:$(stty size)"\n'
         '  [ "$line" = "exit" ] && break\n'
         'done\n'
     )
@@ -191,9 +195,25 @@ def main() -> int:
             send("hello\r")
             check("input passthrough", wait_for(master, "echo:hello"))
 
-            send("\x1c")  # Ctrl+\ (legacy Ctrl+4 encoding): focus back to list
+            # Auto-hide is on by default: the launch focused the terminal,
+            # so the list pane is hidden and the child's PTY spans the full
+            # 120-col frame (minus 2 border cols; 40 rows - help - borders).
+            send("size\r")
+            check("auto-hide grows the pty to full width", wait_for(master, "SIZE: 37 118"))
+
+            # Ctrl+\ (legacy Ctrl+4 encoding): focus back to list. The
+            # provisional row's title only ever renders while the list is
+            # visible, so seeing it proves the panel came back.
+            send("\x1c")
             check("focus toggle back to list", wait_for(master, "(new session)"))
 
+            send("h")
+            check("auto-hide toggles off", wait_for(master, "auto-hide off"))
+            send("\x1c")  # into the terminal; the list stays visible now
+            send("size\r")
+            check("visible list narrows the pty", wait_for(master, "SIZE: 37 88"))
+
+            send("\x1c")  # back to list for the kill flow
             send("\x0b")  # Ctrl+K: kill the selected session
             check("kill confirm shown", wait_for(master, "Kill session?"))
             send("y", 1.0)

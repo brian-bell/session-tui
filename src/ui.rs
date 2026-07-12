@@ -13,28 +13,43 @@ use crate::roster::Row;
 use crate::sessions::Agent;
 use crate::term::SessionStatus;
 
-/// Fraction of the frame given to the session list.
+/// Fraction of the frame given to the session list while a terminal
+/// is attached alongside it.
 pub const LIST_PERCENT: u16 = 25;
+
+/// Fraction given to the list when no terminal is attached and the
+/// right pane only shows the placeholder hint: browsing sessions is
+/// the main activity, so the list gets the room.
+pub const EXPANDED_LIST_PERCENT: u16 = 80;
 
 /// Every rect in the frame, computed once: the split `render` draws
 /// and the PTY size from `terminal_pane_size` cannot disagree.
 struct Panes {
     /// The list+terminal region, used for overlay centering.
     main: Rect,
-    list: Rect,
+    /// None when auto-hide has hidden the list.
+    list: Option<Rect>,
     terminal: Rect,
     help: Rect,
 }
 
-fn panes(frame: Rect) -> Panes {
+fn panes(frame: Rect, app: &App) -> Panes {
     let [main, help] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame);
+    if app.list_hidden() {
+        return Panes { main, list: None, terminal: main, help };
+    }
+    let list_percent = if app.attached_run().is_none() {
+        EXPANDED_LIST_PERCENT
+    } else {
+        LIST_PERCENT
+    };
     let [list, terminal] = Layout::horizontal([
-        Constraint::Percentage(LIST_PERCENT),
-        Constraint::Percentage(100 - LIST_PERCENT),
+        Constraint::Percentage(list_percent),
+        Constraint::Percentage(100 - list_percent),
     ])
     .areas(main);
-    Panes { main, list, terminal, help }
+    Panes { main, list: Some(list), terminal, help }
 }
 
 pub fn render(
@@ -43,8 +58,10 @@ pub fn render(
     screen: Option<&vt100::Screen>,
     statuses: &HashMap<RunId, SessionStatus>,
 ) {
-    let panes = panes(f.area());
-    render_list(f, app, statuses, panes.list);
+    let panes = panes(f.area(), app);
+    if let Some(list) = panes.list {
+        render_list(f, app, statuses, list);
+    }
     render_terminal(f, app, screen, panes.terminal);
     render_help(f, app, panes.help);
     render_overlay(f, app, panes.main);
@@ -53,12 +70,15 @@ pub fn render(
 /// The inner size of the terminal pane for a given frame size; PTYs are
 /// kept at exactly this size. The interior is derived from a `Block`
 /// with the same borders `render_terminal` draws, so the border math
-/// can't drift either.
-pub fn terminal_pane_size(frame: Rect) -> (u16, u16) {
+/// can't drift either. None while browsing: with nothing attached the
+/// right pane is a placeholder hint, not a terminal, and sizing live
+/// detached PTYs to it would rewrap their output.
+pub fn terminal_pane_size(frame: Rect, app: &App) -> Option<(u16, u16)> {
+    app.attached_run()?;
     let inner = Block::default()
         .borders(Borders::ALL)
-        .inner(panes(frame).terminal);
-    (inner.height, inner.width)
+        .inner(panes(frame, app).terminal);
+    Some((inner.height, inner.width))
 }
 
 fn render_list(f: &mut Frame, app: &App, statuses: &HashMap<RunId, SessionStatus>, area: Rect) {
@@ -157,7 +177,7 @@ fn render_help(f: &mut Frame, app: &App, area: Rect) {
         Some(notice) => (sanitize(notice), Style::default().fg(Color::Yellow)),
         None => (
             match app.focus {
-                Focus::List => "Enter resume · n new · Ctrl+K kill · j/k move · q quit",
+                Focus::List => "Enter resume · n new · h auto-hide · Ctrl+K kill · j/k move · q quit",
                 Focus::Terminal => "Ctrl+\\ back to list · PgUp/PgDn scrollback",
             }
             .to_string(),

@@ -83,6 +83,63 @@ fn ctrl_backslash_toggles_focus_and_terminal_mode_passes_keys_through() {
 }
 
 #[test]
+fn list_hides_when_terminal_gains_focus_by_default() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+    assert!(!app.list_hidden(), "list focus: the list is visible");
+
+    press(&mut app, key(KeyCode::Enter)); // resume + focus terminal
+
+    assert_eq!(app.focus, Focus::Terminal);
+    assert!(app.list_hidden(), "auto-hide defaults on");
+}
+
+#[test]
+fn focus_toggle_shows_the_list_again_and_rehides_on_return() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+    press(&mut app, key(KeyCode::Enter));
+    assert!(app.list_hidden());
+
+    press(&mut app, ctrl('\\'));
+    assert!(!app.list_hidden(), "back in the list, the panel shows");
+
+    press(&mut app, ctrl('\\'));
+    assert!(app.list_hidden(), "re-entering the terminal hides it again");
+}
+
+#[test]
+fn h_in_list_focus_toggles_auto_hide_off_and_on() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+
+    let effects = press(&mut app, key(KeyCode::Char('h')));
+    assert!(effects.is_empty());
+    assert_eq!(app.notice.as_deref(), Some("auto-hide off"));
+
+    press(&mut app, key(KeyCode::Enter)); // focus terminal
+    assert!(!app.list_hidden(), "auto-hide off: the list stays visible");
+
+    press(&mut app, ctrl('\\'));
+    press(&mut app, key(KeyCode::Char('h')));
+    assert_eq!(app.notice.as_deref(), Some("auto-hide on"));
+    press(&mut app, ctrl('\\'));
+    assert!(app.list_hidden(), "auto-hide back on hides the list again");
+}
+
+#[test]
+fn h_in_terminal_focus_reaches_the_pty_and_does_not_toggle() {
+    let mut app = App::new(vec![meta("s1", "one")]);
+    press(&mut app, key(KeyCode::Enter));
+    let run_id = app.attached_run().unwrap();
+
+    let effects = press(&mut app, key(KeyCode::Char('h')));
+
+    assert_eq!(
+        effects,
+        vec![Effect::WriteTerminal { run_id, bytes: b"h".to_vec() }]
+    );
+    assert!(app.list_hidden(), "the toggle is list-scoped, not global");
+}
+
+#[test]
 fn quit_is_immediate_when_idle_but_confirmed_when_sessions_are_running() {
     // No running sessions: 'q' quits immediately.
     let mut app = App::new(vec![meta("s1", "one")]);
