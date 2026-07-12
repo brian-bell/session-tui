@@ -270,6 +270,33 @@ fn slash_command_title_combines_command_and_first_human_message() {
 }
 
 #[test]
+fn interrupted_turn_does_not_steal_the_slash_command_title() {
+    // An Escape-interrupted tool call records a plain (non-isMeta) user
+    // text block reading "[Request interrupted by user]"; it must be
+    // skipped so a later genuine human message still titles the session.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("55556666-7777-8888-9999-000011112222.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<command-message>docs</command-message>\n<command-name>docs</command-name>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"actually do this instead"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:04.390Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "/docs · actually do this instead");
+}
+
+#[test]
 fn store_roots_are_created_private() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();

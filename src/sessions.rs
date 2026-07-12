@@ -303,6 +303,14 @@ fn parse_claude_transcript(
         let Some(title) = title_from_content(&value["message"]["content"]) else {
             continue;
         };
+        // Claude records an interrupted turn as a plain (non-isMeta) user
+        // text block, not something the human typed; it must not end the
+        // hunt for a real follow-up message.
+        if title == "[Request interrupted by user]"
+            || title == "[Request interrupted by user for tool use]"
+        {
+            continue;
+        }
         // Slash commands and shell output are recorded as user messages
         // wrapped in <command-...>/<local-command-...> tags. Only the
         // known wrapper tags are synthetic: humans legitimately start
