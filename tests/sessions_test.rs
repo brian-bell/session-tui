@@ -117,6 +117,83 @@ fn title_skips_synthetic_command_messages() {
 }
 
 #[test]
+fn meta_messages_never_title_a_plain_session() {
+    // No slash command involved: an isMeta line (e.g. injected by a
+    // hook or automation) must be skipped just like after a command,
+    // and the first real human message titles the session.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("22223333-4444-5555-6666-777788889999.jsonl"),
+        concat!(
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"injected setup text"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"the real request"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "the real request");
+}
+
+#[test]
+fn command_only_session_keeps_the_bare_slash_title() {
+    // A fire-and-forget slash command run with no follow-up human
+    // message (only tool-result blocks, which have no text) keeps the
+    // command as its title rather than combining with nothing.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("33334444-5555-6666-7777-888899990000.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<command-message>docs</command-message>\n<command-name>docs</command-name>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Base directory for this skill: ..."},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:04.390Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "/docs");
+}
+
+#[test]
+fn unparseable_wrapper_never_prefixes_the_human_title() {
+    // <local-command-caveat> etc. have no <command-name> tag to parse,
+    // so they can never become a "/foo · ..." prefix — only a real
+    // parsed command may. The human message titles alone.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("44445555-6666-7777-8888-999900001111.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>some output</local-command-stdout>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"the actual request"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "the actual request");
+}
+
+#[test]
 fn human_prompts_starting_with_angle_brackets_still_title_the_session() {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("-Users-brian-dev-myproj");
@@ -141,8 +218,9 @@ fn human_prompts_starting_with_angle_brackets_still_title_the_session() {
 fn slash_command_sessions_are_titled_by_their_command() {
     // A session started by a slash command records the human's action
     // as a <command-message>/<command-name> wrapper, and skills then
-    // inject generated text like "Base directory for this skill: ...".
-    // The title must be the command, not the injected text.
+    // inject generated text like "Base directory for this skill: ..."
+    // flagged isMeta. With no real human message after the command,
+    // the title is just the command.
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("-Users-brian-dev-myproj");
     std::fs::create_dir_all(&dir).unwrap();
@@ -151,7 +229,7 @@ fn slash_command_sessions_are_titled_by_their_command() {
         concat!(
             r#"{"type":"user","message":{"role":"user","content":"<command-message>code-review</command-message>\n<command-name>code-review</command-name>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
             "\n",
-            r#"{"type":"user","message":{"role":"user","content":"Base directory for this skill: /Users/brian/.claude/skills/code-review\n\nReview the diff..."},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Base directory for this skill: /Users/brian/.claude/skills/code-review\n\nReview the diff..."},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
             "\n",
         ),
     )
@@ -161,6 +239,34 @@ fn slash_command_sessions_are_titled_by_their_command() {
 
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].title, "/code-review");
+}
+
+#[test]
+fn slash_command_title_combines_command_and_first_human_message() {
+    // When the human follows a slash command with a real message, the
+    // title should carry both: the command for context, and what they
+    // actually asked for. isMeta skill-injection text in between must
+    // not be mistaken for that human message.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("-Users-brian-dev-myproj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("11112222-3333-4444-5555-666677778888.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<command-message>docs</command-message>\n<command-name>docs</command-name>"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:02.390Z"}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Base directory for this skill: /Users/brian/.claude/skills/docs\n\nUpdate documentation..."},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:03.390Z"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"ship these as a new pr"},"cwd":"/Users/brian/dev/myproj","timestamp":"2026-07-01T15:34:04.390Z"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let sessions = scan_claude_sessions(root.path()).unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "/docs · ship these as a new pr");
 }
 
 #[test]

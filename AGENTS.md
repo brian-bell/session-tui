@@ -44,10 +44,12 @@ One binary crate plus a library, `src/`:
   `~/.codex/sessions/**/rollout-*.jsonl` into `SessionMeta` (id, agent,
   cwd, title, mtime timestamp), merged newest-first. Skips Claude
   sidechain transcripts (`isSidechain`) and Codex subagent rollouts
-  (`thread_source == "subagent"`). Titles: first human message; known
-  synthetic wrappers (`<command-*>`, `<local-command-*>`) are skipped,
-  and slash-command sessions are titled `/<command-name>`. Control
-  characters are stripped at parse time. `ensure_store_roots` creates
+  (`thread_source == "subagent"`). Titles: first human message; `isMeta`
+  user messages (skill/system injections) and known synthetic wrappers
+  (`<command-*>`, `<local-command-*>`) are skipped when hunting for it.
+  A slash-command session titles as `/<command> · <first human message>`
+  when a real human message follows the command, or bare `/<command>`
+  if none ever does. Control characters are stripped at parse time. `ensure_store_roots` creates
   missing store roots with 0700. `Scanner` makes rescans incremental:
   it caches parse results per path keyed on (mtime, len) — including
   parsed-and-rejected files — so a watcher rescan only reparses
