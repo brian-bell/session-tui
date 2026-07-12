@@ -272,6 +272,10 @@ fn parse_claude_transcript(
     let reader = BufReader::new(File::open(path)?);
 
     let mut cwd: Option<String> = None;
+    // The slash command that started the session, if any: kept around
+    // (rather than returned immediately) so a real human message right
+    // after it can be combined into the title.
+    let mut command: Option<String> = None;
     let mut fallback_title: Option<String> = None;
     for line in reader.lines() {
         let line = line?;
@@ -290,29 +294,41 @@ fn parse_claude_transcript(
             };
             cwd = Some(c.to_string());
         }
+        // Skills inject generated text (e.g. "Base directory for this
+        // skill: ...") as isMeta user messages; they are not something
+        // the human said and must never become or extend the title.
+        if value["isMeta"] == true {
+            continue;
+        }
         let Some(title) = title_from_content(&value["message"]["content"]) else {
             continue;
         };
-        // Slash commands and shell output are recorded as user messages
-        // wrapped in <command-...>/<local-command-...> tags; a session's
-        // title should be the first thing the human actually did. For a
-        // slash command that is the command itself — later messages are
-        // often skill-injected text, not the human. Only the known
-        // wrapper tags are synthetic: humans legitimately start prompts
-        // with XML/HTML fragments.
-        if title.starts_with("<command-") || title.starts_with("<local-command-") {
-            if let Some(name) = command_name(&value["message"]["content"]) {
-                return Ok(cwd.map(|cwd| SessionMeta {
-                    id: id.to_string(),
-                    agent: Agent::Claude,
-                    cwd,
-                    title: format!("/{name}"),
-                    timestamp,
-                }));
-            }
-            fallback_title.get_or_insert(title);
+        // Claude records an interrupted turn as a plain (non-isMeta) user
+        // text block, not something the human typed; it must not end the
+        // hunt for a real follow-up message.
+        if title == "[Request interrupted by user]"
+            || title == "[Request interrupted by user for tool use]"
+        {
             continue;
         }
+        // Slash commands and shell output are recorded as user messages
+        // wrapped in <command-...>/<local-command-...> tags. Only the
+        // known wrapper tags are synthetic: humans legitimately start
+        // prompts with XML/HTML fragments.
+        if title.starts_with("<command-") || title.starts_with("<local-command-") {
+            if let Some(name) = command_name(&value["message"]["content"]) {
+                command.get_or_insert(name);
+            } else {
+                fallback_title.get_or_insert(title);
+            }
+            continue;
+        }
+        // The first real human message: the title, prefixed with the
+        // command that started the session (if any) for context.
+        let title = match command {
+            Some(c) => format!("/{c} · {title}"),
+            None => title,
+        };
         return Ok(cwd.map(|cwd| SessionMeta {
             id: id.to_string(),
             agent: Agent::Claude,
@@ -321,7 +337,12 @@ fn parse_claude_transcript(
             timestamp,
         }));
     }
-    Ok(cwd.zip(fallback_title).map(|(cwd, title)| SessionMeta {
+    // No real human message ever appeared: fall back to the bare
+    // command, or the unparseable wrapper text, in that order.
+    let title = command
+        .map(|c| format!("/{c}"))
+        .or(fallback_title);
+    Ok(cwd.zip(title).map(|(cwd, title)| SessionMeta {
         id: id.to_string(),
         agent: Agent::Claude,
         cwd,

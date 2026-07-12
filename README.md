@@ -53,7 +53,8 @@ agent verbatim. Confirmation prompts default to No: only `y` confirms.
 - **Discovery**: scans `~/.claude/projects/*/​*.jsonl` and
   `~/.codex/sessions/**/rollout-*.jsonl` directly; subagent/sidechain
   transcripts are skipped. Titles come from the first human message;
-  sessions started with a slash command are titled `/<command>`.
+  sessions started with a slash command are titled `/<command> · <first
+  human message>` (or just `/<command>` if no human message follows).
   A file watcher (500 ms debounce) keeps the list fresh.
 - **Resume**: `claude --resume <id>` / `codex resume <id>` in the
   session's original cwd, inside a fresh PTY. Sessions whose directory
